@@ -1,7 +1,7 @@
 # Data availability
 
 This GitHub repository holds **code only**. All data are distributed through the
-project **Zenodo archive** (DOI: _coming soon_). After cloning, download the
+project **Zenodo archive** (https://zenodo.org/records/20783773). After cloning, download the
 archive and unpack each part into the matching directory below. The pipeline
 expects exactly this layout (paths are set in `config/config.yml`).
 
