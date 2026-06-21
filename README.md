@@ -11,7 +11,7 @@ figures.
 ## Links
 
 - **Paper:** _coming soon_
-- **Data archive (Zenodo):** _coming soon_
+- **Data archive (Zenodo):** https://zenodo.org/records/20783773
 - **Paley Lab:** https://paleylab.com/members/
 
 ## What is in this repository
