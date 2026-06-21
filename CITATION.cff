@@ -1,0 +1,40 @@
+cff-version: 1.2.0
+message: "If you use this code or data, please cite the paper and the Zenodo archive."
+title: "Uveitis Atlas: paired eye and blood single-cell immune profiling in viral and non-infectious uveitis"
+type: software
+authors:
+  # TODO: replace with the full author list and ORCIDs before going public.
+  - family-names: "TODO"
+    given-names: "TODO"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+  - name: "Paley Lab"
+    website: "https://paleylab.com/members/"
+repository-code: "https://github.com/BorchLab/Uveitis-Atlas"
+url: "https://paleylab.com/members/"
+abstract: >-
+  Paired eye (intraocular fluid) and blood single-cell RNA and adaptive immune
+  receptor (TCR/BCR) analysis comparing viral and non-infectious uveitis. The
+  pipeline builds a full immune atlas, an eye sub-atlas, and per-compartment
+  sub-atlases, then runs differential expression, differential abundance,
+  cell-cell communication, repertoire, and TCR motif/distance analyses.
+keywords:
+  - uveitis
+  - single-cell RNA-seq
+  - TCR
+  - BCR
+  - immune repertoire
+  - ocular immunology
+license: MIT
+# TODO: uncomment and fill once minted.
+# version: "1.0.0"
+# doi: "10.5281/zenodo.XXXXXXX"   # Zenodo concept DOI
+# date-released: "2026-XX-XX"
+preferred-citation:
+  type: article
+  title: "TODO: paper title"
+  authors:
+    - family-names: "TODO"
+      given-names: "TODO"
+  # doi: "TODO: paper DOI"
+  # journal: "TODO"
+  # year: 2026

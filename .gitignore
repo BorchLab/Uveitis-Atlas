@@ -1,0 +1,43 @@
+# --- R / Python session cruft (preserved from source) ---
+outputs_pre_rename/
+*.Rproj.user/
+.Rhistory
+.RData
+.Rapp.history
+Rplots.pdf
+__pycache__/
+*.pyc
+.DS_Store
+omnipathr-log/
+logs/
+
+# --- Local tooling / editor ---
+.claude/
+
+# --- Internal design notes (kept local, not published) ---
+docs/plans/
+
+# --- Heavy data: download from Zenodo into these dirs, never commit ---
+# Keep the directory scaffolding (.gitkeep) but ignore everything else.
+inputs/**
+!inputs/
+!inputs/data/
+!inputs/data/.gitkeep
+!inputs/data/metadata_template.csv
+
+outputs/**
+!outputs/
+!outputs/objects/
+!outputs/objects/.gitkeep
+!outputs/processed/
+!outputs/processed/.gitkeep
+!outputs/tables/
+!outputs/tables/.gitkeep
+!outputs/viz/
+!outputs/viz/.gitkeep
+!outputs/qc/
+!outputs/qc/.gitkeep
+
+references/**
+!references/
+!references/.gitkeep

@@ -1,0 +1,1024 @@
+# Reproducible config for Eye Blood Pairs pipeline
+
+seed: 42
+
+cohort: "Paley"
+
+threads: 4
+
+# Global runtime options.
+globals:
+  future_maxbytes: 8.0e+09   # future.globals.maxSize cap (8 GB) for parallel steps
+
+paths:
+  parent_dir: "inputs/data/runs"    # contains per-sample folders with 10x matrices
+  processed_dir: "outputs/processed"
+  qc_dir: "outputs/qc"
+  results_objects: "outputs/objects"
+  results_tables: "outputs/tables"
+  viz_dir: "outputs/viz"
+  # IMGT germlines directory for BCR germline reconstruction (dowser/alakazam).
+  # Download from IMGT and point to the V/D/J fasta directory. If missing,
+  # code falls back to "~/share/germlines/imgt/human/vdj" and skips BCR
+  # lineage analysis when that also doesn't exist.
+  imgt_dir: "~/share/germlines/imgt/human/vdj"
+
+paths_eye:
+  results_objects: "outputs/objects/eye"
+  results_tables: "outputs/tables/eye"
+  viz_dir: "outputs/viz/eye"
+
+qc:
+  min_features: 100
+  max_mito: 10
+  ncount_sd: 2.5
+
+tcr:
+  enable: true
+  separate_dir: false
+  patterns:
+    - "filtered_contig_annotations.csv"
+    - "consensus_annotations.csv"
+    - "annotations.csv"
+  filter_productive: true
+
+integration:
+  nfeatures: 3000
+  pca_dims: 50
+  k_mnn: 15
+
+clustering:
+  k_grid: [15, 20, 30]
+  res_grid_min: 0.1
+  res_grid_max: 1.0
+  res_grid_step: 0.05
+  min_clusters: 12
+  max_clusters: 20
+  repeats: 3
+  score_weights:
+    stability: 0.25
+    modularity: 0.25
+    silhouette: 0.30
+    singletons: 0.20
+
+refinement:
+  enable: true
+  split_resolution: 0.5
+  min_majority_fraction: 0.70
+  min_secondary_fraction: 0.20
+  min_ambiguity_ratio: 2.0
+  max_total_clusters: 40
+
+# Final cluster ID cleanup, applied at the end of annotate_celltypes.
+# renumber: relabel cluster IDs as 0..N-1 in descending-size order so the
+#   numbering is contiguous (no gaps from SNN refinement / force_split).
+cluster_hygiene:
+  renumber: true
+
+visualization:
+  dual_mode: true
+  stripped_bg: "transparent"
+  umap_size: 8
+
+annotation:
+  method: "consensus"
+  azimuth_col: "predicted.celltype.l2"
+  singler_hpca_col: "HPCA.label"
+  singler_monaco_col: "Monaco.label"
+  
+nk_recovery:
+  enable: true
+  nk_signal_threshold: 5.0   # cluster-avg max(NKG7,GNLY,KLRD1) to trigger scan
+  cd3_threshold: 0.5         # per-cell CD3D+CD3E sum below which cell is CD3-low
+  nk_threshold: 2.0          # per-cell NKG7+GNLY+KLRD1 sum above which cell is NK-high
+  min_nk_frac: 0.10          # need ≥10% of cluster to be NK-phenotype
+  min_nk_cells: 800          # absolute floor on recovered cells
+  majority_frac: 0.50        # if ≥50% recovered, relabel the whole cluster
+
+eye_focus:
+  enable: true
+  tissue_col: "Tissue_1"
+  tissue_value: "Eye"
+  # When TRUE, drop full-object Leiden + celltype labels (renamed to *_full)
+  # before re-integration / re-annotation. Always TRUE in normal use; FALSE
+  # only for diagnostics where you want the inherited labels active.
+  rename_inherited_labels: true
+
+# Eye-specific integration / clustering / refinement overrides.
+# Each block is shallow-merged on top of the shared (full-object) config of
+# the same root name. Only the keys you set here override; everything else
+# falls back to integration / clustering / refinement above.
+eye_integration:
+  k_mnn: 20            # higher than full (15) for smoother batch correction
+                       # on the smaller eye subset
+
+eye_clustering:
+  k_grid: [15, 20, 25]     # k=20 gives cohesive communities; k=15 keeps room
+                       # to find solutions in the cluster-count window
+  res_grid_min: 0.1
+  res_grid_max: 1.2    # full range so the tuner can find solutions in [10, 15]
+  res_grid_step: 0.05
+  min_clusters: 10
+  max_clusters: 15
+
+eye_refinement:
+  enable: false        # eye Leiden output is already at the right granularity;
+                       # refinement tends to over-fragment here. Force-NK-split
+                       # and manual_overrides handle the few real edge cases.
+
+# Eye-specific QC and annotation behavior. Applied only to the eye branch.
+eye_qc:
+  # Lens fiber contamination filter — intraocular fluid samples can carry
+  # lens fiber cells (express only crystallins/MIP/BFSP). They are not
+  # leukocytes and create a contaminating cluster after re-integration.
+  # Cells with summed log-normalized expression of these genes above
+  # `lens_threshold` are dropped during 20_subset_eye.R.
+  lens_filter:
+    enable: true
+    genes: ["CRYAA", "CRYAB", "CRYBB1", "CRYBB2", "CRYBB3", "CRYBA1", "CRYBA2",
+            "CRYBA4", "CRYGA", "CRYGD", "CRYGS", "BFSP1", "BFSP2",
+            "MIP", "LIM2", "LGSN", "LENEP", "GJA3"]
+    threshold: 3.0   # sum of log-norm expression above which cell is dropped
+  # Auto-detect low-quality clusters (no positive markers, dominated by
+  # globally-downregulated genes — typically debris / dying cells / ambient
+  # RNA droplets). Flagged clusters get celltype="Low Quality", broad="Other".
+  low_quality_filter:
+    enable: true
+    min_positive_markers: 5     # need >= this many genes with avg_log2FC > 0.5
+    max_negative_fraction: 0.7  # cluster flagged if >70% of top-50 markers are negative
+
+# Eye-specific annotation overrides — defaults to mature tissue cell types.
+# In tissue (eye), CD14/CD16 monocytes are biologically tissue macrophages,
+# and antibody-secreting B cells are plasma cells, not memory B.
+eye_annotation:
+  prefer_mature_labels: true
+  # When prefer_mature_labels: every "CD14 Mono" / "CD16 Mono" cluster in the
+  # eye target is relabeled "Macrophage". B memory / B intermediate clusters
+  # with MZB1 average > mzb1_threshold are relabeled "Plasma".
+  mzb1_threshold: 0.5
+  # Force a cluster ID split when per-cell NK recovery rescues cells from a
+  # T-cell cluster but doesn't trigger majority promotion. Without this, the
+  # rescued NK cells keep the same Leiden cluster ID, so they overlap CD8 T
+  # in UMAP cluster colorings even though their celltype label is correct.
+  force_nk_split: true
+  nk_split_min_cells: 50
+
+# Manual per-Leiden-cluster label overrides, applied at the end of
+# 11_annotate_celltypes.R after all auto-annotation and NK rescue steps,
+# but before cluster_celltype_mapping.csv is written. Use when
+# canonical-marker inspection (e.g. dotplots) disagrees with the consensus
+# call. Keys are Leiden cluster IDs as strings; values set both the fine
+# celltype and its broad lineage.
+manual_overrides:
+  "8":  { celltype: "Platelet", celltype_broad: "Platelet" }  # PPBP/PF4/GP9+, no CD3/NKG7 (not NK)
+  "11": { celltype: "NK",       celltype_broad: "NK"       }  # NKG7/GNLY/KLRD1/GZMB+ (not Mixed)
+
+markers:
+  logfc: 0.25
+  min_pct: 0.1
+
+dge:
+  contrasts:
+    - name: "Eye_vs_Blood"
+      target: "all"
+      group_col: "Tissue_1"
+      group1: "Eye"
+      group2: "Blood"
+    - name: "Autoimmune_vs_Viral"
+      # target "any" makes this contrast fire for any target (eye + compartments)
+      target: "any"
+      group_col: "Phenotype_2"
+      group1: "NIU"
+      group2: "Viral"
+    - name: "Gran_vs_NonGran"
+      target: "eye"
+      group_col: "Phenotype_2"
+      group1: "Gran"
+      group2: "Non_Gran"
+  pseudobulk_method: "DESeq2"
+  logfc: 0.25
+  min_pct: 0.1
+  # Significance thresholds used by panel D v1 (DEG count bars) and any other
+  # downstream viz that pulls from DGE_pseudobulk_*.csv. Independent of the
+  # `logfc` / `min_pct` knobs above, which only control Seurat::FindMarkers.
+  padj_threshold: 0.05
+  lfc_threshold: 0.5
+
+# Etiology grouping used by the compartment-level etiology breakdown
+# (per-NIU-etiology and VZV-vs-other-viral pathway heatmaps in F3/F4/F5).
+# Etiology values come from inputs/data/metadata.csv (column Etiology).
+# Edit these lists when new cohorts are added; downstream viz reads them
+# directly so renaming an etiology in the metadata requires a matching edit
+# here.
+etiology_groups:
+  niu:        ["Idiopathic", "HLA_B27", "VKH", "BSCR", "JIA", "SLE", "Phakic_lens"]
+  viral:      ["VZV_ARN", "HSV1", "HSV2", "CMV_CRN", "HTLV1"]
+  healthy:    ["Healthy"]
+  # Minimum number of biological samples (Subject_Timepoint) required to keep
+  # an etiology as its own column in per-etiology pathway heatmaps. Below this,
+  # the etiology is pooled into "<group>_pooled" (e.g., HSV1 + HSV2 + CMV_CRN
+  # collapse into "Viral_pooled" when each has < min_samples_for_etiology).
+  min_samples_for_etiology: 3
+
+milo:
+  k: 30
+  d: 20
+  prop: 0.1
+  # Cluster-level DA call: a Leiden cluster is flagged "differentially abundant"
+  # when at least N of its nhoods reach SpatialFDR < 0.1 (the threshold is
+  # already applied upstream in R/40_milo.R::summarise_by). Consumed by
+  # compartment_milo_da_clusters() in R/81_viz_compartment_helpers.R.
+  cluster_da_min_sig_nhoods: 2
+
+gsea:
+  # Top-immune-pathways-by-cluster heatmap: how many gene sets to show. One
+  # representative pathway is picked per axis_tag (immunological theme defined
+  # in R/32_escape.R::.escape_axis_regex), then the top N axes by min q across
+  # clusters are kept as heatmap columns.
+  top_immune_pathways_n: 5
+  # Functional-gestalt heatmap: pathways are pooled into N functional groups
+  # via hclust(ward.D2) on the per-cluster logFC matrix, then each tile shows
+  # the mean logFC across that group's pathways for a given cell cluster.
+  # n_groups is clamped to [4, 8] by the helper.
+  functional_n_groups: 7
+  functional_q_threshold: 0.05  # pathway must be q < this in >= 1 cluster
+  # Cross-cluster functional-gestalt heatmap: a pathway is "differential
+  # across clusters" when at least one cluster's mean UCell score is more
+  # than this many SDs from the pathway's average across clusters.
+  cross_cluster_z_threshold: 1.96
+
+escape:
+  enable: true
+  species: "Homo sapiens"
+  libraries: ["H","C2"]
+  method: "UCell"
+  groups: 10000
+  min_size: 10
+  new_assay: "escape.UCell"
+  gs_chunk_size: 100  # gene sets per batch for chunked ssGSEA
+  # Hand-curated module sets scored with UCell on a compartment object via
+  # run_escape_custom_modules(). Output lives in a separate Seurat assay
+  # (e.g. escape.APC) so it doesn't collide with the genome-wide ssGSEA
+  # assay. Add new compartments under their own key; downstream viz reads
+  # `custom_modules[[<key>]]` directly so renaming requires matching edits
+  # in R/85_viz_myeloid.R.
+  custom_modules:
+    myeloid_apc:
+      target_compartment: "myeloid"
+      new_assay: "escape.APC"
+      ucell_dotplot_threshold: 0.1   # fraction-of-cells cutoff for panel F dotplot
+      modules:
+        MHC_II_CLASSICAL:  ["HLA-DRA","HLA-DRB1","HLA-DPA1","HLA-DPB1","HLA-DQA1","HLA-DQB1","CD74","CIITA"]
+        MHC_II_PROCESSING: ["HLA-DMA","HLA-DMB","IFI30","CTSS","CTSB","CTSL"]
+        MHC_I_PROCESSING:  ["HLA-A","HLA-B","HLA-C","B2M","TAP1","TAP2","TAPBP","ERAP1","ERAP2","PSMB8","PSMB9","PSMB10"]
+        CD1_LIPID:         ["CD1A","CD1B","CD1C","CD1D","CD1E"]
+        COSTIM_LICENSING:  ["CD80","CD86","CD40","ICOSLG"]
+
+repertoire:
+  enable: true
+  group_by: ["Tissue_1", "Etiology", "Phenotype"]
+  overlap_method: "morisita"
+  diversity_metrics: ["shannon", "gini.simpson", "inv.simpson"]
+  # Primary clone definition for all main-text overlap and clonotype
+  # analyses. Locked to CTstrict per 2026-05-13 audit R7 + sensitivity
+  # results (outputs/tables/repertoire/{bcr,tcr}_clone_definition_sensitivity.csv):
+  # CTgene was the loosest and gave ~4x higher TCR eye-blood overlap;
+  # CTstrict recovers ~2x more shared BCR clones than CTaa.
+  clone_definition: "CTstrict"
+
+# ---------------------------------------------------------------------------
+# TCR motif / distance / generation analysis (slots 64-66)
+# Intraocular Viral vs NIU contrast. Eye samples only, TRB chain only.
+# Python deps (OLGA, SoNNia, tcrdist3) managed by immLynx via basilisk.
+# ---------------------------------------------------------------------------
+gliph:
+  enable: true
+  method: "gliph2"
+  chain: "TRB"
+  hla_aware: false              # no HLA typing for most subjects
+  refdb_beta: "human_v2.0_CD48" # immGLIPH built-in reference repertoire
+  n_sims: 1000                  # GLIPH internal simulation depth (sim_depth)
+  n_cores: 0                    # 0 = auto (max(1, detectCores() - 1))
+  bootstrap_iterations: 200     # Viral vs NIU enrichment resampling
+  min_group_size: 3             # min CDR3s per convergence group to retain
+  min_cdr3_length: 8
+
+tcrdist:
+  enable: true
+  chain: "TRB"
+  metaclonotype: true
+  metric: "tcrdist"             # alternative: "sceptr"
+  knn: 25
+  min_cdr3_length: 8
+
+olga:
+  enable: true
+  chain: "TRB"
+  model: "humanTRB"             # immLynx model names: humanTRB, humanTRA, humanIGH, mouseTRB
+  use_vj_genes: false           # if true, includes V/J genes in Pgen (slower)
+  n_generate_background: 100000 # background for SoNNia selection inference
+  sonnia: true
+  sonnia_epochs: 50
+
+# ---------------------------------------------------------------------------
+# Advanced TCR analyses (Phase 3e, modules R/67-R/71 + R/89)
+#   gliph_tcrdist        GLIPH vs tcrdist/clusTCR concordance (R/67)
+#   gliph_network        Dual-graph (binary + tcrdist) topology per cluster (R/68)
+#   vdjdb                VDJdb antigen annotation + per-substate enrichment (R/69)
+#   tcr_genex_signatures Expanded/public/GLIPH-enriched gene-expression linkage (R/70)
+#   gliph_motif_overlap  Suffix-prefix OLC assembly of GLIPH motifs (R/71)
+#   viz_tcr_advanced     One dispatcher for all of the above (R/89)
+# ---------------------------------------------------------------------------
+tcr_advanced:
+  vdjdb:
+    release_tag: "2026-05-16"     # bumped from 2023-06-01 to recover VZV
+                                  # (0 -> 31 rows). HSV-1 still absent;
+                                  # IEDB/McPAS sidecar is a planned follow-up.
+    cache_dir: "references/vdjdb"
+    fuzzy_match: false            # V-gene-anchored, length-equal,
+                                  # substitution-only Hamming-1. Anchoring
+                                  # is enforced by the per-V loop in
+                                  # .vdjdb_match — each fuzzy comparison
+                                  # is restricted to VDJdb entries sharing
+                                  # the same allele-stripped V gene.
+    species_keep: ["HomoSapiens"]
+    exclude_self_antigens: true   # honored in .vdjdb_filter_trb;
+                                  # pinning here so the audit trail is
+                                  # in config.
+    # Curated pathogen panel for uveitis-focused enrichment tests.
+    # Strings must match `antigen.species` values in vdjdb.slim.txt
+    # EXACTLY (case-sensitive). Audited against 2026-05-16 on bump.
+    pathogen_panel:
+      primary:
+        - "VZV"                   # 31 rows in 2026-05-16
+        - "CMV"                   # 27,545
+        - "HTLV-1"                # 178
+        - "HSV-1"                 # 0 — absent; sidecar follow-up planned
+        - "HSV-2"                 # 17
+      secondary:
+        - "EBV"                   # 6,488
+        - "InfluenzaA"            # 6,780
+        - "SARS-CoV-2"            # 5,523
+    # CD8 stratification for phenotype/etiology enrichment.
+    # tcell_1 = "Cytotoxic CD8", tcell_3 = "Effector memory T (ITGA1+)".
+    cd8_substate_keys: ["tcell_1", "tcell_3"]
+    # Floor for per-(Etiology x species) Fisher.
+    min_cells_per_etiology: 20
+  network:
+    tcrdist_cutoff: 12.5          # standard tcrdist3 neighborhood radius
+    top_hubs_k: 20
+    min_cluster_size: 3
+  motif:
+    min_motif_len: 4
+    min_overlap: 3
+    max_assembly_len: 20
+    min_edge_weight: 1            # shared_expanded + 0.5 * shared_public floor
+  signature_panels:
+    effector_cytotoxic: [GZMA, GZMB, GZMK, PRF1, IFNG, NKG7, GNLY]
+    exhaustion:         [PDCD1, LAG3, TIGIT, HAVCR2, TOX, ENTPD1]
+    ifn_i:              [ISG15, IFIT1, IFIT3, MX1, OAS1, IFI6]
+    tcr_activation:     [NR4A1, NR4A2, EGR1, FOS, JUN, DUSP1]
+    treg:               [FOXP3, IL2RA, CTLA4, IKZF2]
+    # Type 17 axis added for Figure 5. Motivated by Fig 2 autoimmune
+    # results (RORC + IL17F + IL26 + IL22RA2 + IL23R + CCR6 + KLRB1 long
+    # tail) — lets the clone-group panel show whether motif-enriched
+    # autoimmune clones carry the Type 17 program.
+    type_17:            [IL17A, IL17F, IL22, IL23R, IL26, CCR6, KLRB1, RORC]
+  gliph_enrichment_fdr: 0.1       # FDR cut for tagging gliph_enriched clones
+  pseudobulk_min_cells: 20
+
+  # ---------------------------------------------------------------------------
+  # Figure 5 panel-specific knobs (consumed by R/89 viz functions and R/79
+  # sharpened-bridge code). Three acts:
+  #   Act 1 Antigen-specific landscape (panels A-D)
+  #   Act 2 Novel autoimmune motifs       (panels E-H)
+  #   Act 3 Myeloid -> TCR bridge         (panels I-K)
+  # ---------------------------------------------------------------------------
+  fig5:
+    # Panel A composite: top species to overlay on the intraocular T cell UMAP
+    # faceted by phenotype. Order matters — first six rendered as separate
+    # color layers, rest collapsed into "Other annotated".
+    panel_a_top_species: ["CMV", "EBV", "VZV", "InfluenzaA", "SARS-CoV-2", "HTLV-1"]
+    # Panel C beeswarm: how many bins on the x axis; HLA-B27+ NIU is the
+    # always-on first bin. Healthy is shown when the cohort has >=2 PBMC HC
+    # subjects with TCR data.
+    panel_c_min_subjects_per_group: 2
+    # Panel G logos: top-N NIU-enriched GLIPH clusters to render. Each
+    # cluster gets a logo + per-cluster annotation strip (n CDR3, n subjects,
+    # % B27+ carrier subjects, % TRAV21).
+    panel_g_top_n_niu: 6
+    # Panel H fallback: when the OLC meta-motif assembler returns empty (R/71
+    # weight floor; expected for this cohort), Panel H falls back to a
+    # curated top-N motif-overlap composite — top-N NIU-enriched motifs with
+    # any direct overlap to another GLIPH motif.
+    panel_h_top_n_niu_motifs: 10
+    # Panel K sharpened bridge: minimum cells per subject in the filtered
+    # clone-group for that subject to enter the per-substate pseudobulk PCA.
+    # Below this floor the subject is dropped and declared on-panel.
+    panel_k_min_cells_per_subject: 30
+    # Optional sharpening directions to render in Panel K. Each entry is a
+    # clone-group label and a filter expression resolved per subject.
+    panel_k_clone_groups: ["gliph_niu", "gliph_viral", "expanded", "hla_b27"]
+    # Novel TCR discovery pipeline (R/80 scorer + new F/G/H/I panels). Each
+    # GLIPH motif cluster gets a composite candidate score integrating Pgen,
+    # GLIPH enrichment + cluster properties, network centrality, dominant
+    # T cell cluster + its MiloR DA logFC, Figure-4 LR module engagement,
+    # and a per-cell receptor Z-score over autoimmune-biased receptors.
+    novel_tcr_discovery:
+      min_cluster_size: 2           # drop singleton GLIPH motifs (no convergence signal)
+      expanded_clone_cutoff: 3      # member CDR3 with >= this many cells counts as expanded
+      exclude_b27_in_viz: true      # B27-known motifs are kept in the CSV but
+                                    #   hidden from F/G/H/I once the scorer is
+                                    #   calibrated (B27 ranks top-N as sanity check)
+      top_n_for_viz: 10
+      receptor_z_genes: ["CTLA4","CXCR3","IL2RA","CD44","ITGA4","CD69","PTPRC"]
+      emphasize_clusters: ["0","4"] # visually saturate in Panel I; clusters
+                                    #   identified as NIU-up by MiloR DA
+      panel_f_label_neglog_fdr_threshold: 10
+      panel_h_top_n: 100            # number of top-ranked motifs whose
+                                    #   member cells populate the Panel H
+                                    #   comparison vs the NIU eye baseline
+                                    # Panel I now uses ALL autoimmune-biased
+                                    #   (NIU-driving) myeloid->T-cell LR pairs
+                                    #   regardless of LIANA's assigned target
+                                    #   cluster; zero-variance genes are
+                                    #   dropped after the per-clone mean is
+                                    #   computed.
+      panel_i_top_n_lr: 10          # legacy: LR pairs per target cluster
+      panel_i_top_n_clones: 25      # focused Panel I heatmap row count
+      panel_i_top_n_clones_broad: 100
+                                    # broad Panel I heatmap row count
+                                    #   (rendered as a second file)
+      panel_i_oversample: 5         # multiplier on top_n when pulling
+                                    #   candidates before the Unknown-disease
+                                    #   filter; ensures the displayed row count
+                                    #   matches request
+      panel_i_column_split: 6       # number of functional gene modules to
+                                    #   carve out of the column dendrogram
+                                    #   (matches the ~7 LIANA ligand families)
+      panel_i_highlight_top_k: 5    # legacy: deprecated under ComplexHeatmap
+      panel_i_niu_pvalue_threshold: 0.05
+                                    # CellPhoneDB NIU p-value cutoff for an
+                                    #   LR pair to count as autoimmune-enriched
+      panel_i_disease_bias_threshold: 0
+                                    # minimum disease_bias_logfc (NIU vs Viral)
+                                    #   for an LR pair to enter the heatmap.
+                                    #   Raise to 0.5 / 1 for stricter filter.
+                                    # label every Panel F motif with
+                                    #   -log10(BH-FDR) >= this value
+                                    #   (5 = FDR < 1e-5). Threshold-based
+                                    #   rather than top-N so the visibly
+                                    #   strong candidates always get named.
+      feature_weights:              # per-feature weights for the rank-sum.
+        # The two primary disease-discrimination signals (fisher_p, n_cells)
+        # carry the most weight. log_pgen and gliph internal scores are
+        # downweighted because they reward small clusters with perfect but
+        # uninformative convergence.
+        fisher_p:           2.5     # NIU vs Viral Fisher — primary disease signal
+        n_cells:            2.0     # cluster size — must reward real expansion
+        niu_enrichment:     1.5
+        frac_in_NIU:        1.5
+        n_subjects:         1.2     # convergence breadth
+        dominant_DA_logFC:  1.0
+        receptor_Z:         1.0
+        log_pgen:           0.6     # antigen selection (downweighted: noisy)
+        LR_targeting:       0.5
+        network_centrality: 0.3
+
+composition:
+  enable: true
+  method: "propeller"
+
+bcr_lineage:
+  enable: true
+  min_clone_size: 5
+  max_trees: 20
+  # Per-clone architecture metrics for Figure 6 panels F + G (R/58).
+  # See docs/plans/2026-05-27-fig6-bcr-architecture-plan.md.
+  architecture:
+    min_clone_size: 3
+    min_clusters_for_shared: 2
+    min_mutated_cells_for_selection: 1
+    force_recompute: false
+    baseline:
+      regions: ["cdr", "fwr"]
+      test_statistic: "focused"
+      seed: 42
+
+# =============================================================================
+# Compartment-scoped sub-atlases (Figures 3-5)
+# =============================================================================
+
+# Parent eye-cluster IDs that seed each compartment. Per-cell lens
+# contamination is handled by the UCell-based filter under
+# `lens_ucell_filter` below, applied once to the eye object before the
+# compartment split (replaces the previous cluster-11 mregDC hygiene
+# split, which only operated on one cluster).
+compartments:
+  # UCell lens contamination filter, applied to the eye object at the start
+  # of subset_compartments before any T/B/Myeloid split. Rank-based, so
+  # robust to per-cell sequencing-depth differences that the eye-stage
+  # sum-of-log-norm filter in eye_qc$lens_filter is sensitive to.
+  #
+  # Workflow:
+  #   1. Set cfg$steps$lens_ucell_diagnostic: true and run the pipeline once.
+  #      This writes outputs/tables/eye/lens_ucell_threshold_suggestion.csv
+  #      and (when batch_key is set) lens_ucell_threshold_suggestion_per_batch.csv
+  #      plus a distribution PDF. Inspect both before locking the filter.
+  #   2. Decide: single global threshold OR per-batch thresholds. Per-batch
+  #      thresholds are recommended whenever the per-batch median range
+  #      exceeds ~50% of the global IQR (see lens_ucell_batch_effect_summary.csv).
+  #   3. Commit the chosen threshold(s) below.
+  #         Scalar form (global):
+  #           threshold: 0.18
+  #         Mapping form (per-batch, keyed by levels of batch_key):
+  #           threshold:
+  #             US: 0.22
+  #             Japan: 0.14
+  #   4. Set `enable: true`, re-run compartment_subset. Audit trail goes to
+  #      outputs/tables/eye/lens_ucell_filter_report.csv.
+  #
+  # batch_key  — metadata column that stratifies cells into batches the
+  #              diagnostic and filter should respect (e.g. "Cohort",
+  #              "orig.ident", "Subject"). NULL means single global pool
+  #              and no per-batch suggestions are computed.
+  # genes      — optional gene panel override. Defaults to
+  #              cfg$eye_qc$lens_filter$genes so the eye-stage and
+  #              compartment-stage filters share a panel.
+  lens_ucell_filter:
+    enable: true
+    batch_key: "Cohort"   # set to NULL for global-only; or use "orig.ident"
+                          # for sample-level batching
+    threshold: 0.03       # chosen 2026-05-13 to capture the smaller bimodal
+                          # tail visible in lens_ucell_distribution.pdf —
+                          # tighter than the auto-suggested percentile-99
+                          # (0.0464) which only flagged the long tail.
+    fallback_quantile: 0.99
+    # genes: []           # optional panel override
+
+  # Myeloid CTaa filter (T1.3). Drives apply_myeloid_ctaa_filter() in
+  # R/14_repertoire_qc.R. Decide after inspecting
+  # outputs/tables/repertoire/myeloid_ctaa_filter_comparison.csv.
+  #   "a" — drop any CTaa+ (legacy default, conservative)
+  #   "b" — drop CTaa+ matching top-N expanded lymphocyte clones
+  #         (carryover/doublet signature)
+  #   "c" — keep all, flag CTaa+ in metadata
+  #   "d" — drop CTaa+ AND lineage_score above median (T or B panel)
+  myeloid_ctaa_filter: "b"
+
+  # T2.5: timepoint policy applied to the eye object before the T/B/Myeloid
+  # split. "all" preserves every visit per subject (default). "earliest"
+  # keeps the lexically smallest orig.ident per Subject — works for sample
+  # IDs that encode visit order (e.g. UV215_003 < UV215_004). Eye / full
+  # branches are unaffected.
+  timepoint_policy: "all"
+  # Compartments are now selected by celltype_broad labels rather than
+  # Leiden cluster IDs. The cluster-ID approach was unstable: as of
+  # 2026-05-13 the eye object's clusters had drifted such that cluster 6
+  # was 95% B cells (currently in tcell parents), cluster 8 was 96%
+  # Monocyte/Macrophage (currently in bcell parents), and cluster 12 was
+  # mostly NK+T (currently in myeloid parents). See
+  # outputs/tables/eye/cluster_lineage_validation.csv for the per-cluster
+  # audit. celltype_keys are stable across re-clusterings; parent_clusters
+  # remain as a legacy fallback only if celltype_keys is unset.
+  myeloid:
+    celltype_keys: ["Monocyte/Macrophage", "DC"]
+    parent_clusters: ["2", "4", "10", "12"]   # legacy fallback
+    description: "Monocytes + macrophages + DCs (T/B/NK excluded by celltype)"
+  bcell:
+    celltype_keys: ["B cell"]
+    parent_clusters: ["7", "8"]               # legacy fallback
+    description: "All B-lineage cells (Plasma included when celltype_broad == B cell)"
+  tcell:
+    celltype_keys: ["T cell"]
+    parent_clusters: ["0", "1", "6"]          # legacy fallback
+    description: "All T cells. NK cells (separate broad label) are excluded."
+
+# Post-hoc cluster-level contamination filter (T1.4). Runs after the initial
+# Leiden clustering inside subset_one_compartment(). For each cluster, scores
+# the per-gene detection rate of an expected (canonical lineage) panel and
+# one or more off-target (contamination) panels. Drops a cluster when its top
+# off-target score exceeds the expected score AND clears `min_offtarget`.
+# After dropping, the compartment is re-clustered on the existing embedding
+# restricted to kept cells so the surviving IDs renumber 0..N-1.
+#
+# Use case: the per-cell lineage gate (above) catches cells with strong
+# off-target marker expression, but cluster-3 myeloid contamination on
+# 2026-05-17 showed cells with WEAK individual T-marker expression that
+# collectively dominated the cluster's differential signature. The post-hoc
+# filter catches that as a whole-cluster decision instead of a per-cell one.
+#
+# Audit at outputs/tables/qc/compartment_contamination_<cmp>.csv.
+compartment_contamination_filter:
+  enable: true
+  min_offtarget: 0.20
+  myeloid:
+    enable: true
+    expected_panel: ["CD14","CD68","LYZ","C1QA","C1QB","C1QC","CSF1R","CD163",
+                     "FCN1","FCER1A","CD1C","LAMP3","LILRA4","CLEC4C","CD207",
+                     "VCAN","MRC1","S100A8","S100A9"]
+    offtarget_panels:
+      T_cell:      ["CD3D","CD3E","CD3G","TRAC","TRBC1","TRBC2","CD8A","CD8B","CD4"]
+      B_cell:      ["MS4A1","CD79A","CD79B","CD19","BANK1"]
+      Stromal_epi: ["KRT5","KRT14","KRT18","COL1A1","COL3A1","AEBP1","VASH2","PDGFRA"]
+  bcell:
+    enable: true
+    expected_panel: ["MS4A1","CD79A","CD79B","CD19","BANK1","MZB1","JCHAIN",
+                     "SDC1","DERL3","IGHM","IGHD"]
+    offtarget_panels:
+      T_cell:   ["CD3D","CD3E","CD3G","TRAC","TRBC1","TRBC2"]
+      Mono_Mac: ["CD14","FCN1","LYZ","C1QA","C1QB","S100A8","S100A9"]
+  tcell:
+    enable: true
+    expected_panel: ["CD3D","CD3E","CD3G","TRAC","CD8A","CD8B","CD4","NKG7","GNLY"]
+    offtarget_panels:
+      B_cell:   ["MS4A1","CD79A","CD79B","CD19","BANK1"]
+      Mono_Mac: ["CD14","FCN1","LYZ","C1QA","C1QB","S100A8","S100A9"]
+
+# Canonical-marker lineage gate applied at the compartment-subset boundary
+# (R/16_compartment_lineage_gate.R, invoked from R/22_subset_compartments.R
+# inside subset_one_compartment). For each candidate cell selected by
+# celltype_keys, score 15 marker panels by within-panel detection rate; keep
+# the cell only if its top scoring panel is in `expected_panels[<cmp>]` and
+# it does not co-express any non-immune panel. Catches the 1-3% per-cell
+# broad-label errors that the PBMC-trained annotator makes (mregDC routed
+# into bcell, T cells routed into myeloid, ocular epithelium routed into
+# either) — these get amplified to 10-20% of the compartment because the
+# compartments are small. Audit at outputs/tables/qc/compartment_gate_report.csv.
+#
+# strict_mode TRUE additionally drops cells positive for an off-target immune
+# panel (e.g., NK markers in bcell). Conservative; off by default because the
+# Plasma panel still shares JCHAIN/MZB1 with pDC at low rates and dropping
+# every co-expressor would over-filter legitimate plasma cells.
+compartment_lineage_gate:
+  enable: true
+  panel_threshold: 0.25
+  # Strict mode also drops cells positive on off-target IMMUNE panels (not just
+  # non-immune). Accepts a single boolean (apply to all) or a list of
+  # compartment names where strict mode should be on. Enabled 2026-05-17 for
+  # myeloid only — bcell/tcell lose 30-50% of legit cells under global strict
+  # because their populations naturally co-express adjacent immune panels.
+  strict_mode: ["myeloid"]
+  # Per-compartment override: panels in this list are NOT treated as off-target
+  # immune even though they're not in expected_panels. Use case: pDCs in the
+  # myeloid compartment co-express Plasma markers (JCHAIN/MZB1/IGKC) as part
+  # of their biology, so without this exclusion strict_mode drops ~95% of real
+  # pDC for "offtarget_immune_panel_positive(Plasma)".
+  offtarget_immune_exclude:
+    myeloid: ["Plasma"]
+  expected_panels:
+    bcell:   ["B_cell","Plasma"]
+    myeloid: ["Mono_Mac","cDC","mregDC","pDC","Granulocyte"]
+    tcell:   ["T_cell","NK"]
+
+paths_myeloid:
+  results_objects: "outputs/objects/eye/myeloid"
+  results_tables: "outputs/tables/eye/myeloid"
+  viz_dir: "outputs/viz/eye/myeloid"
+
+paths_bcell:
+  results_objects: "outputs/objects/eye/bcell"
+  results_tables: "outputs/tables/eye/bcell"
+  viz_dir: "outputs/viz/eye/bcell"
+
+paths_tcell:
+  results_objects: "outputs/objects/eye/tcell"
+  results_tables: "outputs/tables/eye/tcell"
+  viz_dir: "outputs/viz/eye/tcell"
+
+# Compartment subsets are smaller than the eye object. Use higher k_mnn for
+# smoother batch correction. If a compartment has fewer cells than
+# harmony_fallback_threshold, the script falls back from fastMNN to harmony.
+compartment_integration:
+  k_mnn: 20
+  nfeatures: 2000
+  harmony_fallback_threshold: 3000
+  # Drop per-sample subsets below this size before SelectIntegrationFeatures
+  # so FindVariableFeatures can fit a mean-variance trend. Compartment subsets
+  # frequently contain 1-10 cells from some samples (e.g. a single myeloid
+  # cell in an aqueous-fluid sample dominated by T cells); those samples
+  # contribute too few observations for stable HVG/MNN selection.
+  min_cells_per_sample: 30
+
+# Tighter cluster-count window than the full or eye objects since each
+# compartment is biologically narrower. Shared baseline — the
+# `<cmp>_clustering` blocks below shallow-merge on top of this so each
+# compartment can size its own grid to its cell count and biology.
+compartment_clustering:
+  k_grid: [10, 15, 20]
+  res_grid_min: 0.1
+  res_grid_max: 1.5
+  res_grid_step: 0.05
+  min_clusters: 4
+  max_clusters: 10
+
+# Per-compartment clustering overrides (shallow-merged onto compartment_clustering
+# via R/22_subset_compartments.R::.resolve_compartment_clustering, mirroring the
+# eye_clustering pattern). Only set keys you want to override.
+#
+# Why these knobs matter together:
+#   - max_clusters caps what the tuner is allowed to *accept*. With the old
+#     shared cap of 10, bcell/tcell tuner runs (outputs/tables/eye/<cmp>/
+#     knn_leiden_tuning.csv) explored 9-26 cluster solutions and threw them
+#     out with score=NA.
+#   - min_clusters is the floor. Raising it forces the scorer to compare
+#     fine-grained solutions against each other, not against a 4-cluster
+#     coarse partition that scores high on silhouette but hides biology.
+#   - score_weights$silhouette penalizes overlapping/continuum-like
+#     partitions. For T cells (Naive→CM→EM→EMRA is a true continuum),
+#     keeping silhouette high collapses biologically distinct states.
+#     B cells have a partial continuum (memory→plasmablast→plasma);
+#     myeloid clusters are more discrete (cDC vs pDC vs Mac is sharp).
+
+bcell_clustering:
+  # ~5,300 cells post-gate. Targets: Naive, Transitional, classical Memory,
+  # FCRL4+ atypical memory, Plasmablast, IgG/IgA/IgM Plasma (+ minor).
+  k_grid: [10, 15, 20, 25]
+  res_grid_max: 1.5
+  min_clusters: 4
+  max_clusters: 8
+  score_weights:
+    stability:  0.30    # 5k cells — repeat-to-repeat consistency matters
+    modularity: 0.30    # reward graph-supported splits
+    silhouette: 0.20    # partial continuum across memory→plasma axis
+    singletons: 0.20
+
+myeloid_clustering:
+  # ~13,600 cells post-gate. Targets: 3 monocyte states, 4 macrophage states
+  # (Inflam, FOLR2+ TRM, TREM2+ LAM, ISG+), cDC1/cDC2/mregDC/pDC/Langerhans,
+  # Granulocyte. Discrete lineages — keep silhouette at baseline.
+  k_grid: [15, 20, 25, 30]
+  res_grid_max: 1.5
+  min_clusters: 7
+  max_clusters: 14
+
+tcell_clustering:
+  # ~72,000 cells post-gate. Coarser map requested 2026-05-16: target broad
+  # CD4/CD8/Treg/MAIT/gd/cytotoxic groupings rather than a 15-state continuum.
+  # Silhouette restored to baseline so the tuner is allowed to collapse
+  # continuum-like states.
+  k_grid: [20, 30, 40, 50]
+  res_grid_max: 2.0
+  min_clusters: 5
+  max_clusters: 10
+  score_weights:
+    silhouette: 0.30
+    modularity: 0.30
+    stability:  0.20
+
+# Hand-curated substate display labels keyed by cluster ID. Filled in after the
+# first pass renders numeric panels and you inspect the per-substate marker
+# table. Format on plots: "<id>: <label>".
+#
+# Labeled 2026-05-17 from outputs/tables/eye/<cmp>/FindAllMarkers_objclusters.csv.
+# Myeloid clusters 3 and 5 are contamination (T/B doublets and stromal) that
+# the lineage gate did not catch — flagged here so figures call them out
+# rather than mislabel them. Myeloid 7 has no strong canonical signature.
+compartment_substate_labels:
+  # Verified 2026-05-17 against panel detection rates + FindAllMarkers
+  # output post strict_mode gate. Myeloid cluster 3 is residual T-doublet
+  # contamination that the gate didn't catch (weak <25% T-panel detection);
+  # flagged here rather than mislabeled.
+  myeloid:
+    "0": "Classical inflammatory mono"
+    "1": "FOLR2+ TRM macrophage"
+    "2": "TREM2+ LAM"
+    "3": "Macrophage"
+    "4": "pDC"
+    "5": "Langerhans/cDC2"
+    "6": "Intermediate/transitional mono"
+    "7": "cDC1"
+    "8": "mregDC"
+  bcell:
+    "0": "Plasma cell"
+    "1": "Memory B (MS4A1+ ITGAX+)"
+    "2": "Cycling plasmablast"
+    "3": "IgG plasma cell"
+    "4": "Cycling memory B"
+  tcell:
+    "0": "Naive/CM CD4"
+    "1": "Cytotoxic CD8"
+    "2": "CD4 Tfh-like/Tex (CXCL13+ PD1+)"
+    "3": "Effector memory T (ITGA1+)"
+    "4": "Treg"
+    "5": "Cycling T"
+
+# Top-N expanded eye clones per subject for the eye-blood overlap tables.
+repertoire_top_n_eye: 20
+
+steps:
+  ingest_data: false      # already done — per-sample QC objects exist
+  airr_annotation: false
+  integration: false
+  annotation: false
+  merge_clusters: false
+  markers: false
+  dge: false
+  escape: false
+  milo: false
+  composition: false
+  bcr_lineage: false
+  # Figure 6 panels F + G + S6 (per-clone BCR architecture).
+  bcell_lineage_architecture: true
+  bcell_baseline_selection: false  # gated; flip when shazam is installed
+  bcell_architecture_viz: true
+  visualize: false
+  # NB: Ibex / Trex / encoder-benchmark / ibex_phylogeny / trex_neighborhood /
+  # ibex_clone_size_feasibility / ibex_external_validation steps were removed
+  # 2026-06-03; the embedding analyses are not in the publication.
+  eye_subset: false             # OFF to preserve outputs/objects/eye/IntegratedSeuratObject.rds
+  eye_reintegrate: false        # OFF to preserve the eye sub-atlas. Flip both back to
+                                # true only when intentionally rebuilding F2.
+  eye_annotate: false
+  eye_markers: false
+  eye_dge: false
+  eye_milo: false
+  eye_composition: false
+  eye_visualize: false
+  # Tier 0 read-only diagnostics — flip on individually as you work
+  # through the audit decisions, then turn back off for routine reruns.
+  lens_ucell_diagnostic: false        # → lens_ucell_filter$threshold
+  ctaa_filter_diagnostic: false       # → myeloid_ctaa_filter choice
+  clone_definition_sensitivity: false # → repertoire$clone_definition
+  lineage_validation: false           # → eye_manual_overrides
+  pseudobulk_N_audit: false           # → underpowered substate review
+  lineage_purity_audit: false         # per-cluster canonical-lineage purity audit (R/18)
+  compartment_subset: false
+  compartment_markers: false
+  compartment_dge: true
+  compartment_escape: false
+  compartment_custom_modules: false   # curated UCell modules per compartment (panel F)
+  compartment_composition: false
+  compartment_milo: false
+  compartment_visualize: false
+  # Cross-compartment LR signalling (panels G of F3/F4/F5). joint_substate is
+  # cheap and still drives downstream multi-compartment viz; LIANA replaces
+  # the prior CellChat module (retired 2026-05-19, see R/47).
+  joint_substate: true
+  # --- Phase 1d (Figure 4 cross-compartment + bridge + LIANA) ---
+  compartment_pca: true            # per-substate pseudobulk PCA -> CSVs
+  cross_compartment_bridge: true    # subject-level myeloid PC1 vs T cell PC1
+  liana_myeloid_tcell: true         # rank-aggregated LR map per etiology
+  nichenet_myeloid_tcell: true      # ligand-activity prediction (default OFF)
+  viz_cross_compartment: false       # F4 panels F-H
+  eye_blood_repertoire: true
+  # --- TCR motif / distance / generation (Viral vs NIU intraocular) ---
+  gliph: false
+  tcrdist: false
+  olga: false
+  viz_tcr_compare: false
+  # --- Phase 3e: advanced TCR analyses (R/67-71 + R/89 viz) ---
+  # Re-enabled 2026-05-22 for Figure 5 production. Most outputs already
+  # exist on disk; re-running tcr_genex_signatures is the one expensive
+  # step (UCell + DESeq2 over ~70k T cells). viz_tcr_advanced + R/79 are
+  # cheap and idempotent so they stay on for figure iteration.
+  gliph_tcrdist: false             # GLIPH x tcrdist concordance (outputs exist)
+  gliph_network: false             # dual-graph network metrics (outputs exist)
+  vdjdb: true                      # rerun 2026-05-22 after fuzzy_match: false flip
+  tcr_genex_signatures: true       # rerun to pick up new type_17 panel
+  gliph_motif_overlap: false       # OLC assembly (returns empty for this cohort;
+                                   #   Panel H uses the motif_overlap_edges
+                                   #   fallback wired into R/89)
+  viz_tcr_advanced: true           # render all R/89 panels (Figure 5)
+  tcr_sharpened_bridge: true       # R/79: Panel K GLIPH-restricted PC1 bridge
+  novel_tcr_discovery: true        # R/80: score every GLIPH motif as a novel
+                                   #   autoimmune-pathogenic TCR candidate
+
+# =============================================================================
+# Phase 1d — Figure 4 cross-compartment configuration (compartment PCA,
+# cross-compartment PC1 bridge, LIANA cell-cell communication, NicheNet
+# ligand activity, plus cross-compartment viz). Each module is gated by its
+# own cfg$steps$* flag so they can be run individually.
+# =============================================================================
+
+compartment_pca:
+  # Floor for per-(subject, substate) pseudobulk inclusion. Asymmetric:
+  # myeloid is sparser (~26 subjects, 14 NIU / 12 Viral) so it gets a
+  # lower floor than T / B cell. See planning doc 2026-05-19 audit.
+  min_cells_per_subject_substate_myeloid: 20
+  min_cells_per_subject_substate_tcell:   30
+  # Dropped from 30 -> 10 (2026-05-27) to rescue cluster 2 Cycling plasmablast
+  # in the PC1/PC2 panel. NIU still has 3 pbs at this floor; t-test on n=3 vs
+  # n=7 is underpowered (flagged "(underpowered)" in F4_D-style panels) but
+  # the point cloud is visible. Clusters 3/4 stay dropped (0 NIU pbs at any
+  # floor) and the bridge correlations for those substates remain unavailable.
+  min_cells_per_subject_substate_bcell:   10
+  min_gene_count: 10
+  vst_blind: false                  # match F3 inline convention (blind=FALSE)
+  hvg_n: 2000
+  n_pcs: 5
+  pc1_split_fdr: 0.05               # Welch t on PC1_oriented across Phenotype_2
+
+cross_compartment_bridge:
+  weight_by_cluster_size: true
+  also_save_unweighted: true
+  strata: ["pooled", "etiology"]
+  n_bootstrap: 2000
+  n_permutation: 1000
+
+liana:
+  methods: ["natmi", "connectome", "logfc", "sca", "cellphonedb"]
+  resource: "Consensus"
+  min_cells_per_cluster: 10
+  conditions: ["NIU", "Viral"]
+  source_regex: "^myeloid_"
+  target_regex: "^tcell_"
+  top_n_for_chord: 30
+  top_n_for_bias_dotplot: 30
+
+nichenet:
+  ligand_target_matrix_version: "v2_human"
+  lr_network_version: "v2_human"
+  geneset_size: 50
+  min_expression_fraction: 0.10
+  top_n_ligands: 20
+
+paths_cross_compartment:
+  tables: "outputs/tables/cross_compartment/"
+  viz:    "outputs/viz/cross_compartment/"
+
+# T cell PC1 receptor / effector program panel for F4 panel E (mirrors the
+# myeloid_programs block below). Each program is a curated gene list; the
+# .pc1_loadings_by_program helper writes one row per (substate, program,
+# gene) restricted to disease-separating substates.
+tcell_programs:
+  TCR_signal:        ["CD3D","CD3E","CD3G","ZAP70","LCK","LAT","ITK"]
+  CD4_CD8:           ["CD4","CD8A","CD8B"]
+  Costim_receptor:   ["CD28","ICOS","CD40LG","TNFRSF4","TNFRSF9","TNFRSF18"]
+  Checkpoint:        ["PDCD1","LAG3","TIGIT","HAVCR2","BTLA","CTLA4"]
+  Cytokine_receptor: ["IL23R","IFNGR1","IFNGR2","IL2RA","IL2RB","IL2RG","IL7R","IL6R","IL10RA"]
+  Effector_cytokine: ["IFNG","TNF","IL17F","IL17A","IL22","IL26","IL21","GZMH","GZMB","GZMA","GZMK","PRF1","GNLY"]
+  Chemokine_receptor: ["CXCR3","CXCR6","CCR4","CCR5","CCR6","CCR7","CXCR5"]
+  Tissue_residence: ["ITGA1","ITGAE","CD69","CXCR6","ZNF683","RUNX3"]
+  Transcription_factor: ["RORC","TBX21","GATA3","FOXP3","EOMES","BCL6","PRDM1","RUNX3"]
+
+# Myeloid PC1 sender program panel for F3 panel E (now also written out as a
+# canonical CSV via R/45_compartment_pca::.pc1_loadings_by_program).
+myeloid_programs:
+  HLA_I:    ["HLA-A","HLA-B","HLA-C","HLA-E","HLA-F","B2M"]
+  HLA_II:   ["HLA-DRA","HLA-DRB1","HLA-DPA1","HLA-DPB1","HLA-DQA1","HLA-DQB1","CIITA","CD74"]
+  CD1:      ["CD1A","CD1B","CD1C","CD1D","CD1E"]
+  Costim_ligand:     ["CD80","CD86","CD40","ICOSLG","TNFSF4","TNFSF9","TNFSF18"]
+  Checkpoint_ligand: ["CD274","PDCD1LG2","LGALS9","HHLA2","VTCN1"]
+  Cytokine:          ["IL12A","IL12B","IL23A","IL10","IL6","IL1B","TNF","IFNB1"]
+  Chemokine:         ["CXCL9","CXCL10","CXCL11","CCL2","CCL5","CCL7","CCL8","CCL18","CCL20","CCL22"]
+
+# =============================================================================
+# Figure 6 (B cell) additions — added 2026-05-24
+# =============================================================================
+
+# B cell ligand/receptor program panel. Mirrors `myeloid_programs` /
+# `tcell_programs` so .liana_classify_ligand_family() (R/47) can be reused for
+# B-side ligands/receptors. Consumed by R/49_liana_bcell.R and the Figure 6
+# LIANA dotplot panel (R/86_viz_bcell.R).
+bcell_programs:
+  BAFF_APRIL_R:      ["TNFRSF13B","TNFRSF13C","TNFRSF17"]
+  Follicular_help_R: ["CXCR5","CD40","IL21R","ICOS"]
+  HLA_II:            ["HLA-DRA","HLA-DRB1","HLA-DPA1","HLA-DPB1","HLA-DQA1","HLA-DQB1","CD74"]
+  Costim_ligand:     ["CD80","CD86"]
+  Checkpoint_ligand: ["CD274","PDCD1LG2","LGALS9"]
+  Ig_class_switch:   ["AICDA","CD27","CD38","MS4A1","ITGAX","TBX21","FCRL4","FCRL5"]
+
+# LIANA — B cell-centered. Mirrors `liana:` (myeloid->tcell) but iterates
+# four directions and uses bcell_programs for family annotation on the B
+# side. Outputs land under outputs/tables/cross_compartment/ with file stems
+# liana_<source>_to_<target>_{NIU,Viral}.csv plus per-direction combined.
+liana_bcell:
+  methods: ["natmi","connectome","logfc","sca","cellphonedb"]
+  resource: "Consensus"
+  min_cells_per_cluster: 10
+  conditions: ["NIU","Viral"]
+  top_n_for_dotplot: 25
+  directions:
+    - {name: "myeloid_to_bcell", source_compartments: ["myeloid"], target_compartments: ["bcell"], source_regex: "^myeloid_", target_regex: "^bcell_"}
+    - {name: "tcell_to_bcell",   source_compartments: ["tcell"],   target_compartments: ["bcell"], source_regex: "^tcell_",   target_regex: "^bcell_"}
+    - {name: "bcell_to_tcell",   source_compartments: ["bcell"],   target_compartments: ["tcell"], source_regex: "^bcell_",   target_regex: "^tcell_"}
+    - {name: "bcell_to_myeloid", source_compartments: ["bcell"],   target_compartments: ["myeloid"], source_regex: "^bcell_", target_regex: "^myeloid_"}
+
+# Cross-subject fuzzy IGH "public" clones. Bucket on V gene + J gene +
+# CDR3-aa length, then single-link cluster within bucket by Hamming distance
+# threshold = floor(max_hamming_pct * L). Etiology-stratified by default.
+bcr_public:
+  enable: true
+  max_hamming_pct: 0.10
+  v_match: "gene"            # strip allele suffix
+  j_match: "gene"
+  min_cdr3_length: 10        # suppress short-junction convergent FPs
+  require_same_etiology: true
+  also_run_cross_etiology: true
+  min_subjects_per_cluster: 2
+  perm_null_iters: 100
+
+# =============================================================================
+# Figure 6 step toggles (gated by run_pipeline.R Phase 6)
+# =============================================================================
+steps_fig6:
+  bcell_paired_metrics:        true
+  tcell_paired_metrics:        true
+  bcell_lineage_trees:         true
+  liana_bcell:                 true
+  liana_supplemental_table:    true   # combine R/47 + R/49 combined CSVs
+  bcr_public_clones:           true
+  viz_bcell_fig6:              true
+  viz_tcr_sharing_supp:        true
+  check_architecture:          false  # Fig 6 F/G/S6 schema regression check (warns)
