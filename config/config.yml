@@ -484,6 +484,12 @@ tcr_advanced:
         log_pgen:           0.6     # antigen selection (downweighted: noisy)
         LR_targeting:       0.5
         network_centrality: 0.3
+    # Supplemental Figure 5 panels (R/89 viz_fig5_s3b). The blood<->eye expanded
+    # -clone alluvial restricts to these phenotypes and counts an eye clone as
+    # "expanded" at >= expanded_clone_min_cells eye cells.
+    fig5_supp:
+      groups_keep: ["NIU", "Viral"]
+      expanded_clone_min_cells: 3
 
 composition:
   enable: true

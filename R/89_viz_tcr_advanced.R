@@ -2675,6 +2675,153 @@ viz_fig5_d_alluvial_by_antigen_class <- function(cfg) {
 }
 
 # ---------------------------------------------------------------------------
+# Supplemental: blood<->eye sharing of expanded TCR clones (alluvial).
+# Strata are the two tissues (Blood, Eye); each ribbon is one expanded eye TCR
+# clone, coloured by whether it is also detected in the paired blood (shared)
+# or eye-restricted. Each disease group is normalised to 100% so NIU and Viral
+# are comparable on one axis, with a per-subject Wilcoxon test on the shared
+# fraction. Reads outputs/tables/repertoire/TCR_top_expanded_eye.csv.
+# ---------------------------------------------------------------------------
+
+# Per-subject Phenotype_2 lookup from the sample metadata (one row/subject).
+.fig5_supp_subject_pheno <- function(cfg) {
+  md_path <- file.path(cfg$paths$inputs %||% "inputs", "data", "metadata.csv")
+  if (!file.exists(md_path)) md_path <- "inputs/data/metadata.csv"
+  if (!file.exists(md_path)) return(NULL)
+  md <- utils::read.csv(md_path, stringsAsFactors = FALSE, check.names = TRUE)
+  if (!all(c("Subject", "Phenotype_2") %in% colnames(md))) return(NULL)
+  dplyr::distinct(md[, c("Subject", "Phenotype_2")])
+}
+
+viz_fig5_s3b_eye_blood_clone_alluvial <- function(cfg) {
+  p <- .tcra_paths(cfg)
+  exp_csv <- file.path(p$tables_rep, "TCR_top_expanded_eye.csv")
+  groups_keep <- cfg$tcr_advanced$fig5_supp$groups_keep %||% c("NIU", "Viral")
+  min_cells <- cfg$tcr_advanced$fig5_supp$expanded_clone_min_cells %||% 3L
+  if (!file.exists(exp_csv)) {
+    log_message("  viz_fig5_s3b: TCR_top_expanded_eye.csv missing; skipping.")
+    return(invisible(NULL))
+  }
+  if (!requireNamespace("ggalluvial", quietly = TRUE)) {
+    log_message("  viz_fig5_s3b: ggalluvial not installed; skipping.")
+    return(invisible(NULL))
+  }
+  ex <- utils::read.csv(exp_csv, stringsAsFactors = FALSE)
+  ex <- ex[!is.na(ex$n_cells_eye) & ex$n_cells_eye >= min_cells, , drop = FALSE]
+  pheno <- .fig5_supp_subject_pheno(cfg)
+  if (!is.null(pheno))
+    ex <- dplyr::left_join(ex, pheno, by = c("subject" = "Subject"))
+  else ex$Phenotype_2 <- NA_character_
+  ex <- ex[ex$Phenotype_2 %in% groups_keep, , drop = FALSE]
+  if (nrow(ex) == 0) {
+    log_message("  viz_fig5_s3b: no expanded clones map to NIU/Viral; skipping.")
+    return(invisible(NULL))
+  }
+  ex$found    <- as.logical(as.character(ex$found_in_blood))
+  ex$found[is.na(ex$found)] <- FALSE
+  ex$clone_uid <- paste(ex$subject, ex$clone_id, sep = "|")
+  ex$sharing   <- ifelse(ex$found, "Shared (eye + blood)", "Eye-restricted")
+
+  # Per-group totals + shared fraction, and a NIU-vs-Viral test on the
+  # per-subject shared fraction (same statistic as the S3 boxplot).
+  ann <- ex |>
+    dplyr::group_by(.data$Phenotype_2) |>
+    dplyr::summarise(n = dplyr::n(), n_shared = sum(.data$found),
+                     pct = round(100 * mean(.data$found)), .groups = "drop")
+  subj <- ex |>
+    dplyr::group_by(.data$Phenotype_2, .data$subject) |>
+    dplyr::summarise(frac = mean(.data$found), .groups = "drop")
+  pval <- tryCatch(stats::wilcox.test(frac ~ Phenotype_2, data = subj)$p.value,
+                   error = function(e) NA_real_)
+  n_subj <- table(subj$Phenotype_2)
+  grp_order <- intersect(groups_keep, ann$Phenotype_2)
+  ex$facet  <- factor(ex$Phenotype_2, levels = grp_order)
+
+  # Relative sizing: normalise each disease group so its column sums to 100%,
+  # putting NIU and Viral on the same axis (matches the Fig 6G compartment
+  # panel style). Each clone's weight = 100 / (clones in its group).
+  n_by_grp <- stats::setNames(ann$n, ann$Phenotype_2)
+  ex$w <- 100 / n_by_grp[ex$Phenotype_2]
+
+  # Long (lodes) form: one row per (clone, tissue).
+  long <- rbind(
+    data.frame(clone_uid = ex$clone_uid, facet = ex$facet, sharing = ex$sharing,
+               w = ex$w, tissue = "Blood",
+               present = ifelse(ex$found, "In blood", "Eye only"),
+               stringsAsFactors = FALSE),
+    data.frame(clone_uid = ex$clone_uid, facet = ex$facet, sharing = ex$sharing,
+               w = ex$w, tissue = "Eye", present = "In eye",
+               stringsAsFactors = FALSE))
+  long$tissue  <- factor(long$tissue, levels = c("Blood", "Eye"))
+  long$present <- factor(long$present, levels = c("In blood", "Eye only", "In eye"))
+  long$sharing <- factor(long$sharing,
+                         levels = c("Shared (eye + blood)", "Eye-restricted"))
+
+  # Absolute-count labels on each stratum, positioned by the normalised stack.
+  # geom_stratum default reverse=TRUE puts the first present-level on TOP, so at
+  # Blood "In blood" sits on top (height = pct), "Eye only" below it.
+  lab_df <- do.call(rbind, lapply(seq_len(nrow(ann)), function(i) {
+    g <- ann$Phenotype_2[i]; pct <- 100 * ann$n_shared[i] / ann$n[i]
+    data.frame(
+      facet = factor(g, levels = grp_order),
+      tissue = factor(c("Blood", "Blood", "Eye"), levels = c("Blood", "Eye")),
+      y = c(100 - pct / 2, (100 - pct) / 2, 50),
+      label = c(sprintf("In blood\nn=%d", ann$n_shared[i]),
+                sprintf("Eye only\nn=%d", ann$n[i] - ann$n_shared[i]),
+                sprintf("In eye\nn=%d", ann$n[i])),
+      stringsAsFactors = FALSE)
+  }))
+
+  # Bold shared-fraction callout, centred above each facet.
+  callout <- data.frame(
+    facet = factor(ann$Phenotype_2, levels = grp_order), y = 110,
+    label = sprintf("%d%% shared (%d / %d)", ann$pct, ann$n_shared, ann$n),
+    stringsAsFactors = FALSE)
+
+  # Highlight shared (indigo) against eye-restricted (sage green), echoing the
+  # Fig 6G "Mixed" highlight over "Eye only".
+  pal <- c(`Shared (eye + blood)` = "#3B4CA0", `Eye-restricted` = "#A6CE9B")
+  g <- ggplot2::ggplot(long,
+                       ggplot2::aes(x = .data$tissue, stratum = .data$present,
+                                    alluvium = .data$clone_uid, y = .data$w,
+                                    fill = .data$sharing)) +
+    ggalluvial::geom_flow(width = 0.36, alpha = 0.65,
+                          color = "white", linewidth = 0.15) +
+    ggalluvial::geom_stratum(width = 0.36, fill = "grey96", color = "black",
+                             linewidth = 0.5) +
+    ggplot2::geom_text(data = lab_df, inherit.aes = FALSE,
+                       ggplot2::aes(x = .data$tissue, y = .data$y, label = .data$label),
+                       size = 2.9, lineheight = 0.9) +
+    ggplot2::geom_text(data = callout, inherit.aes = FALSE, hjust = 0.5,
+                       ggplot2::aes(x = 1.5, y = .data$y, label = .data$label),
+                       fontface = "bold", size = 4.1) +
+    ggplot2::facet_wrap(~ .data$facet) +
+    ggplot2::scale_fill_manual(values = pal, name = NULL, na.translate = FALSE) +
+    ggplot2::scale_x_discrete(expand = ggplot2::expansion(add = c(0.3, 0.3))) +
+    ggplot2::scale_y_continuous(limits = c(0, 116),
+                                breaks = c(0, 25, 50, 75, 100),
+                                labels = function(b) paste0(b, "%")) +
+    ggplot2::labs(
+      title = "Blood-to-eye sharing of expanded TCR clones",
+      subtitle = sprintf(paste0("Each group normalised to 100%% of its expanded eye clones ",
+                                "(>= %d cells). NIU vs Viral shared fraction: Wilcoxon p = %s."),
+                         min_cells, formatC(pval, format = "g", digits = 2)),
+      x = NULL, y = "Expanded clones (within-group fraction)") +
+    ggplot2::theme_classic(base_size = 11) +
+    ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                   plot.subtitle = ggplot2::element_text(size = 8),
+                   strip.text = ggplot2::element_text(face = "bold", size = 12),
+                   strip.background = ggplot2::element_rect(fill = "grey92",
+                                                            color = NA),
+                   legend.position = "top")
+  save_pdf_png(g, file.path(p$base, "fig5_s3b_eye_blood_clone_alluvial"),
+               w = 8.5, h = 6)
+  log_message(sprintf("  viz_fig5_s3b: wrote blood-eye clone alluvial (Wilcoxon p=%s).",
+                      formatC(pval, format = "g", digits = 2)))
+  invisible(TRUE)
+}
+
+# ---------------------------------------------------------------------------
 # Top-level dispatcher
 # ---------------------------------------------------------------------------
 run_visualizations_tcr_advanced <- function(cfg) {
@@ -2702,6 +2849,8 @@ run_visualizations_tcr_advanced <- function(cfg) {
   try(viz_fig5_h_top_niu_motif_overlap(cfg),   silent = FALSE)
   try(viz_fig5_i_clone_group_lr_with_b27(cfg), silent = FALSE)
   try(viz_fig5h_topn_sensitivity(cfg),         silent = FALSE)
+  # Supplemental blood<->eye expanded-clone sharing alluvial.
+  try(viz_fig5_s3b_eye_blood_clone_alluvial(cfg), silent = FALSE)
   log_message("viz_tcr_advanced complete.")
   invisible(TRUE)
 }
