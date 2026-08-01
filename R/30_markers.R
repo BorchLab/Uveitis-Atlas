@@ -387,10 +387,27 @@ run_dge <- function(cfg, target = c("all", "eye", "myeloid", "bcell", "tcell")) 
 # design to `~ Cohort * group` or `~ Cohort + group` if the data supports
 # it. `force_simple = TRUE` bypasses cohort upgrades — used for within-
 # cohort sensitivity passes.
+#
+# Stress-sensitivity extension (2026-07-31):
+#   covariate_df    data.frame with columns `cluster`, `sample`, and one column
+#                   per name in covariate_cols. `sample` must match this
+#                   function's own sample_col choice (Subject_Timepoint for the
+#                   eye object). Keyed on the (cluster, sample) PAIR, because
+#                   the covariate is a mean over the cells in that pseudobulk
+#                   column, not a per-sample constant.
+#   covariate_cols  character vector prepended to the design.
+# Both NULL reproduces the published behaviour exactly, so the existing call
+# sites below and in R/70_tcr_genex_signatures.R are unaffected.
 run_pseudobulk_deseq2 <- function(obj, group_col, group1, group2,
                                    cluster_col, cfg,
                                    target = "all",
-                                   force_simple = FALSE) {
+                                   force_simple = FALSE,
+                                   covariate_df = NULL,
+                                   covariate_cols = NULL) {
+  covariate_cols <- as.character(covariate_cols %||% character(0))
+  use_cov <- !is.null(covariate_df) && length(covariate_cols) > 0L
+  if (use_cov && !all(c("cluster", "sample") %in% colnames(covariate_df)))
+    stop("run_pseudobulk_deseq2: covariate_df needs `cluster` and `sample`.")
   suppressPackageStartupMessages({
     library(Matrix)
   })
@@ -464,6 +481,51 @@ run_pseudobulk_deseq2 <- function(obj, group_col, group1, group2,
 
     coldata$group <- factor(coldata$group, levels = c(group2, group1))
 
+    # --- Optional continuous covariate (stress sensitivity) -----------------
+    # Join, drop incomplete columns BEFORE the gene filter (dropping after would
+    # change `keep` and quietly move the tested gene universe away from the
+    # published run, contaminating the concordance comparison), then z-score
+    # WITHIN this cluster so the coefficient scale is comparable across
+    # substates of very different size.
+    n_cov_dropped <- 0L
+    if (use_cov) {
+      cvv <- covariate_df[as.character(covariate_df$cluster) == as.character(cl),
+                          c("sample", covariate_cols), drop = FALSE]
+      idx <- match(as.character(coldata$sample), as.character(cvv$sample))
+      for (cvn in covariate_cols) coldata[[cvn]] <- cvv[[cvn]][idx]
+      okc <- stats::complete.cases(coldata[, covariate_cols, drop = FALSE])
+      n_cov_dropped <- sum(!okc)
+      # A join that misses EVERYTHING is a key mismatch, not a data property.
+      # Without this it degrades to "cluster skipped", the target silently
+      # vanishes from the verdict table, and the absence reads like "no effect".
+      if (n_cov_dropped == nrow(coldata))
+        stop("run_pseudobulk_deseq2: the covariate join matched no pseudobulk ",
+             "column for cluster '", cl, "'. covariate_df$sample must use the ",
+             "same key this function chose ('", sample_col, "'). Saw e.g. '",
+             paste(utils::head(as.character(coldata$sample), 2), collapse = "', '"),
+             "' vs covariate '",
+             paste(utils::head(as.character(cvv$sample), 2), collapse = "', '"),
+             "'.", call. = FALSE)
+      if (n_cov_dropped > 0L)
+        log_message("  covariate (", cl, "): dropping ", n_cov_dropped,
+                    " pseudobulk column(s) with missing covariate.")
+      coldata <- coldata[okc, , drop = FALSE]
+      agg     <- agg[, rownames(coldata), drop = FALSE]
+      if (nrow(coldata) < 4) next
+      if (length(unique(coldata$group)) < 2) next
+      if (any(table(coldata$group) < 2)) next
+      bad <- FALSE
+      for (cvn in covariate_cols) {
+        v <- as.numeric(coldata[[cvn]])
+        if (stats::sd(v) <= .Machine$double.eps) { bad <- TRUE; break }
+        coldata[[cvn]] <- as.numeric(scale(v))
+      }
+      if (bad) {
+        log_message("  covariate (", cl, "): zero variance; skipping cluster.")
+        next
+      }
+    }
+
     # --- Decide on design: paired (+ Subject) when feasible -----------------
     use_paired <- FALSE
     if (has_subject && "Subject" %in% colnames(coldata)) {
@@ -509,9 +571,23 @@ run_pseudobulk_deseq2 <- function(obj, group_col, group1, group2,
       }
     }
 
-    design_f <- if (use_cohort_design) cohort_design_f
+    # Covariate designs take precedence: the sensitivity arm deliberately wants
+    # ~ stress + group, not a cohort or paired upgrade layered on top. The
+    # contrast below is extracted by NAME, so the covariate's position in the
+    # formula does not matter.
+    design_f <- if (use_cov)            stats::reformulate(c(covariate_cols, "group"))
+                else if (use_cohort_design) cohort_design_f
                 else if (use_paired)   ~ Subject + group
                 else                    ~ group
+
+    mm_chk <- try(stats::model.matrix(design_f, data = coldata), silent = TRUE)
+    if (inherits(mm_chk, "try-error") || qr(mm_chk)$rank < ncol(mm_chk)) {
+      log_message("  design rank-deficient (", cl, ", ",
+                  paste(deparse(design_f), collapse = ""),
+                  "); skipping cluster. In the eye arm Phenotype_2, Tissue_2 ",
+                  "and Cohort are perfectly collinear.")
+      next
+    }
 
     dds <- DESeq2::DESeqDataSetFromMatrix(
       countData = round(as.matrix(agg)),
@@ -546,7 +622,9 @@ run_pseudobulk_deseq2 <- function(obj, group_col, group1, group2,
       }, error = function(e) NA_real_)
     }
 
-    model_used <- if (use_cohort_design) cohort_model_meta$model_used
+    model_used <- if (use_cov)          paste0("covariate_adjusted[",
+                                               paste(covariate_cols, collapse = "+"), "]")
+                  else if (use_cohort_design) cohort_model_meta$model_used
                   else if (use_paired)   "paired_subject"
                   else                   "simple_group"
 
@@ -557,6 +635,9 @@ run_pseudobulk_deseq2 <- function(obj, group_col, group1, group2,
              paired       = use_paired,
              model_used   = model_used,
              interaction_p_median = interaction_p) %>%
+      { if (use_cov) mutate(.,
+             stress_covariate    = paste(covariate_cols, collapse = "+"),
+             n_pb_dropped_na_cov = n_cov_dropped) else . } %>%
       filter(!is.na(padj)) %>%
       arrange(padj)
 
