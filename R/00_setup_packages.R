@@ -108,22 +108,53 @@
 
 # ---- Main entry points -------------------------------------------------------
 
+# Packages required only by a single early phase. If one of these cannot be
+# installed or loaded, that phase is unavailable but everything downstream still
+# runs, so the loader must not abort the process.
+#
+# Azimuth is the live example. It is used only by R/02_ingest_data.R for
+# reference mapping during ingest, and current Azimuth fails to load against
+# current Signac ("object 'RunChromVAR' is not exported by 'namespace:Signac'").
+# Before this guard existed that broke EVERY invocation of run_pipeline.R,
+# including pure visualization re-renders that never touch ingest, because
+# load_all_packages() runs before the config is even read.
+.OPTIONAL_PACKAGES <- c("Azimuth")
+
 #' Install any missing packages and load all pipeline dependencies.
+#'
+#' Failures on packages listed in .OPTIONAL_PACKAGES are downgraded to a warning
+#' so a broken optional dependency cannot block unrelated phases.
 load_all_packages <- function() {
-  # Install missing
+  failed <- character(0)
+
   for (entry in .PACKAGE_MANIFEST) {
-    .install_if_missing(entry$pkg, entry$source)
+    ok <- tryCatch({ .install_if_missing(entry$pkg, entry$source); TRUE },
+                   error = function(e) FALSE, warning = function(w) TRUE)
+    if (!ok && !(entry$pkg %in% .OPTIONAL_PACKAGES))
+      warning(sprintf("Install step failed for required package '%s'.", entry$pkg))
   }
 
-  # Load all
   suppressPackageStartupMessages({
     for (entry in .PACKAGE_MANIFEST) {
-      if (requireNamespace(entry$pkg, quietly = TRUE)) {
-        library(entry$pkg, character.only = TRUE)
-      }
+      loaded <- tryCatch({
+        if (requireNamespace(entry$pkg, quietly = TRUE)) {
+          library(entry$pkg, character.only = TRUE); TRUE
+        } else FALSE
+      }, error = function(e) FALSE)
+      if (!loaded) failed <- c(failed, entry$pkg)
     }
   })
 
+  if (length(failed)) {
+    hard <- setdiff(failed, .OPTIONAL_PACKAGES)
+    soft <- intersect(failed, .OPTIONAL_PACKAGES)
+    if (length(soft))
+      message("NOTE: optional package(s) unavailable, dependent phases disabled: ",
+              paste(soft, collapse = ", "))
+    if (length(hard))
+      stop("Required package(s) failed to load: ", paste(hard, collapse = ", "),
+           call. = FALSE)
+  }
   invisible(TRUE)
 }
 

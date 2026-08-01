@@ -1,6 +1,22 @@
 # R/02_ingest_data.R
+#
+# Azimuth is loaded softly. run_pipeline.R sources every module unconditionally
+# before it reads the config, so a hard `library(Azimuth)` here aborts the whole
+# script even for runs that never ingest anything (a visualization re-render,
+# for example). Current Azimuth fails against current Signac with
+# "object 'RunChromVAR' is not exported by 'namespace:Signac'", which made every
+# invocation fail until this guard was added.
+#
+# The Azimuth call site inside ingest_data() is already wrapped in tryCatch and
+# falls back to the SingleR/HPCA/Monaco consensus, so an ingest run without
+# Azimuth degrades rather than breaks.
 suppressPackageStartupMessages({
-  library(Azimuth)
+  if (requireNamespace("Azimuth", quietly = TRUE)) {
+    library(Azimuth)
+  } else {
+    message("NOTE: Azimuth unavailable; reference mapping in ingest will be ",
+            "skipped and annotation falls back to the SingleR consensus.")
+  }
   library(Seurat)
   library(Matrix)
   library(patchwork)
