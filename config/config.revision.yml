@@ -1,3 +1,20 @@
+# config.revision.yml — 2026-08-01 revision analysis pass.
+#
+# Derived from config.yml. Identical analysis parameters; only the steps
+# blocks differ. Enables exactly the steps whose inputs or code changed for
+# the revision and nothing else. NicheNet, LIANA, VDJdb, TCR-genex and
+# novel-TCR discovery stay OFF: none of them changed and each is expensive.
+#
+# run_pipeline.R fires these in dependency order within a single run:
+#   stress_qc -> compartment_pca -> cross_compartment_bridge ->
+#   stress_sensitivity -> pc1_jackknife -> pc1_floor_sensitivity ->
+#   pc1_pair_stability -> diagnosis_lodo
+# so one invocation is sufficient and correctly ordered.
+#
+# Figures are a SEPARATE pass: use config/config.run.yml afterwards.
+# blood_replication is excluded from the sensitivity targets here because it
+# loads the 3.5 GB full atlas; run that one in its own session.
+
 # Reproducible config for Eye Blood Pairs pipeline
 
 seed: 42
@@ -825,9 +842,9 @@ steps:
   composition: false
   bcr_lineage: false
   # Figure 6 panels F + G + S6 (per-clone BCR architecture).
-  bcell_lineage_architecture: true
+  bcell_lineage_architecture: false
   bcell_baseline_selection: false  # gated; flip when shazam is installed
-  bcell_architecture_viz: true
+  bcell_architecture_viz: false
   visualize: false
   # NB: Ibex / Trex / encoder-benchmark / ibex_phylogeny / trex_neighborhood /
   # ibex_clone_size_feasibility / ibex_external_validation steps were removed
@@ -849,15 +866,15 @@ steps:
   lineage_validation: false           # → eye_manual_overrides
   pseudobulk_N_audit: false           # → underpowered substate review
   lineage_purity_audit: false         # per-cluster canonical-lineage purity audit (R/18)
-  stress_qc: false                    # dissociation/acute-stress scoring (R/19)
-  stress_sensitivity: false           # stress-adjusted contrast harness (R/46b)
-  pc1_jackknife: false                # leave-one-subject-out on F3E/F4D/F4E (R/46c)
-  pc1_floor_sensitivity: false        # myeloid floor sweep for F4E (R/46c)
-  pc1_pair_stability: false           # F4F permutation-resolution ladder (R/46c)
-  diagnosis_lodo: false               # leave-one-diagnosis-out on the NIU arm (R/46d)
+  stress_qc: true                    # dissociation/acute-stress scoring (R/19)
+  stress_sensitivity: true           # stress-adjusted contrast harness (R/46b)
+  pc1_jackknife: true                # leave-one-subject-out on F3E/F4D/F4E (R/46c)
+  pc1_floor_sensitivity: true        # myeloid floor sweep for F4E (R/46c)
+  pc1_pair_stability: true           # F4F permutation-resolution ladder (R/46c)
+  diagnosis_lodo: true               # leave-one-diagnosis-out on the NIU arm (R/46d)
   compartment_subset: false
   compartment_markers: false
-  compartment_dge: true
+  compartment_dge: false
   compartment_escape: false
   compartment_custom_modules: false   # curated UCell modules per compartment (panel F)
   compartment_composition: false
@@ -866,14 +883,14 @@ steps:
   # Cross-compartment LR signalling (panels G of F3/F4/F5). joint_substate is
   # cheap and still drives downstream multi-compartment viz; LIANA replaces
   # the prior CellChat module (retired 2026-05-19, see R/47).
-  joint_substate: true
+  joint_substate: false
   # --- Phase 1d (Figure 4 cross-compartment + bridge + LIANA) ---
   compartment_pca: true            # per-substate pseudobulk PCA -> CSVs
   cross_compartment_bridge: true    # subject-level myeloid PC1 vs T cell PC1
-  liana_myeloid_tcell: true         # rank-aggregated LR map per etiology
-  nichenet_myeloid_tcell: true      # ligand-activity prediction (default OFF)
+  liana_myeloid_tcell: false         # rank-aggregated LR map per etiology
+  nichenet_myeloid_tcell: false      # ligand-activity prediction (default OFF)
   viz_cross_compartment: false       # F4 panels F-H
-  eye_blood_repertoire: true
+  eye_blood_repertoire: false
   # --- TCR motif / distance / generation (Viral vs NIU intraocular) ---
   gliph: false
   tcrdist: false
@@ -886,14 +903,14 @@ steps:
   # cheap and idempotent so they stay on for figure iteration.
   gliph_tcrdist: false             # GLIPH x tcrdist concordance (outputs exist)
   gliph_network: false             # dual-graph network metrics (outputs exist)
-  vdjdb: true                      # rerun 2026-05-22 after fuzzy_match: false flip
-  tcr_genex_signatures: true       # rerun to pick up new type_17 panel
+  vdjdb: false                      # rerun 2026-05-22 after fuzzy_match: false flip
+  tcr_genex_signatures: false       # rerun to pick up new type_17 panel
   gliph_motif_overlap: false       # OLC assembly (returns empty for this cohort;
                                    #   Panel H uses the motif_overlap_edges
                                    #   fallback wired into R/89)
-  viz_tcr_advanced: true           # render all R/89 panels (Figure 5)
-  tcr_sharpened_bridge: true       # R/79: Panel K GLIPH-restricted PC1 bridge
-  novel_tcr_discovery: true        # R/80: score every GLIPH motif as a novel
+  viz_tcr_advanced: false           # render all R/89 panels (Figure 5)
+  tcr_sharpened_bridge: false       # R/79: Panel K GLIPH-restricted PC1 bridge
+  novel_tcr_discovery: false        # R/80: score every GLIPH motif as a novel
                                    #   autoimmune-pathogenic TCR candidate
 
 # =============================================================================
@@ -928,7 +945,7 @@ cross_compartment_bridge:
 # ---------------------------------------------------------------------------
 stress_qc:
   seed: 42
-  ucell_maxrank: 1500          # recorded in the coverage table; see depth panel
+  ucell_maxrank: 1500          
   min_genes_present: 3
   min_frac_present: 0.5
   primary_score: "stress_dissoc_pruned_ucell"
@@ -944,14 +961,13 @@ stress_sensitivity:
   pca_arms: ["published", "rbe_group_protected", "rbe_naive", "hvg_drop"]
   primary_pca_arm: "rbe_group_protected"
   gating_arms: ["rbe_group_protected"]
-  targets: ["eye_dge", "myeloid_pca", "tcell_pca", "bridge",
-            "blood_replication"]
+  targets: ["eye_dge", "myeloid_pca", "tcell_pca", "bridge"]
   snapshot_published: true
   n_bootstrap: 2000
   n_permutation: 1000
   collinearity:
     vif_warn: 5.0
-    vif_abort: 10.0            # above this the arm is refused, not warned
+    vif_abort: 10.0            
   criteria:
     eye_dge:
       lfc_spearman_minor: 0.90
@@ -995,7 +1011,6 @@ pc1_jackknife:
   min_abs_pc1_cor: 0.80
   bridge_min_r: 0.40
   bridge_min_frac_perm_p: 0.95
-  # Supplemental disclosure sweep for Reviewer 1 Major 3.
   floor_sweep: [5, 10, 15, 20, 25, 30]
 
 paths_stress_sensitivity:
@@ -1099,12 +1114,12 @@ bcr_public:
 # Figure 6 step toggles (gated by run_pipeline.R Phase 6)
 # =============================================================================
 steps_fig6:
-  bcell_paired_metrics:        true
-  tcell_paired_metrics:        true
-  bcell_lineage_trees:         true
-  liana_bcell:                 true
-  liana_supplemental_table:    true   # combine R/47 + R/49 combined CSVs
-  bcr_public_clones:           true
-  viz_bcell_fig6:              true
-  viz_tcr_sharing_supp:        true
+  bcell_paired_metrics:        false
+  tcell_paired_metrics:        false
+  bcell_lineage_trees:         false
+  liana_bcell:                 false
+  liana_supplemental_table:    false   # combine R/47 + R/49 combined CSVs
+  bcr_public_clones:           false
+  viz_bcell_fig6:              false
+  viz_tcr_sharing_supp:        false
   check_architecture:          false  # Fig 6 F/G/S6 schema regression check (warns)
