@@ -554,7 +554,19 @@ suppressPackageStartupMessages({
 }
 
 .myeloid_panelD_pca_facets <- function(obj, paths, cfg) {
-  pbs <- build_per_substate_pseudobulks(obj)
+  # F3E display floor, distinct from the floor the F4E bridge uses. See the
+  # long note on compartment_pca in config/config.yml: at floor 20 three
+  # myeloid substates lose their NIU arm below testability and cluster 7
+  # disappears, which is wrong for a coverage panel; at floor 10 the
+  # subject-level bridge is attenuated, which is wrong for the coupling
+  # statistic. The two analyses therefore use different floors and, as of
+  # 2026-07-31, write to different files.
+  f3e_floor <- as.integer(
+    (cfg$compartment_pca$min_cells_per_subject_substate_myeloid_f3e) %||% 10L)
+  # Built once at that floor and injected into compute_per_substate_pca() below,
+  # so AggregateExpression runs once rather than twice and the floor cannot
+  # differ between the two calls.
+  pbs <- build_per_substate_pseudobulks(obj, min_cells_per_pb = f3e_floor)
   if (length(pbs) == 0) {
     log_message("  panel D v3 (PCA facets): no pseudobulks; skipping.")
     return(invisible())
@@ -576,34 +588,48 @@ suppressPackageStartupMessages({
   # pca_variance_explained.csv / pca_pc1_significance.csv under
   # outputs/tables/eye/myeloid/ — same CSVs the F4 cross-compartment bridge
   # reads, so running F3 viz alone is now sufficient to refresh the F4 input.
+  #
+  # 2026-07-31: every argument below used to be hardcoded here, with
+  # min_cells_per_pb = 10L, while run_compartment_pca(cfg, "myeloid") used the
+  # config value of 20. Whichever ran last won, and the two disagreed: the
+  # submitted F3E came from floor 10, the submitted F4E bridge (r = 0.700,
+  # n = 22) came from floor 20. Methods states 20. Everything is now read from
+  # cfg$compartment_pca so the two entry points cannot diverge again.
+  cpcfg <- cfg$compartment_pca %||% list()
   pca_res <- compute_per_substate_pca(
     obj,
-    min_cells_per_pb = 10L,            # match historical F3 floor
-    min_gene_count   = 10L,
-    hvg_n            = 2000L,
-    n_pcs            = 5L,
-    vst_blind        = FALSE,
-    pc1_split_fdr    = 0.05
+    min_cells_per_pb = f3e_floor,
+    min_gene_count   = as.integer(cpcfg$min_gene_count %||% 10L),
+    hvg_n            = as.integer(cpcfg$hvg_n %||% 2000L),
+    n_pcs            = as.integer(cpcfg$n_pcs %||% 5L),
+    vst_blind        = isTRUE(cpcfg$vst_blind),
+    pc1_split_fdr    = as.numeric(cpcfg$pc1_split_fdr %||% 0.05),
+    pbs              = pbs
   )
   if (is.null(pca_res)) {
     log_message("  panel D v3 (PCA facets): compute_per_substate_pca returned NULL.")
     return(invisible())
   }
 
-  # Persist CSVs (the canonical F4 input). Idempotent; safe to rerun.
+  # Persist to *_f3e.csv, NOT over the canonical pca_*.csv.
+  #
+  # This used to write the canonical names, which meant whichever of
+  # run_compartment_pca(cfg, "myeloid") and this function ran last silently
+  # decided what the F4 bridge read. That is how the submitted F3E (floor 10)
+  # and F4E (floor 20) ended up derived from different PCAs of the same data.
+  # The panels now own separate files and cannot overwrite each other.
   ensure_dir(paths$results_tables)
-  utils::write.csv(pca_res$scores,
-                   file.path(paths$results_tables, "pca_subject_scores.csv"),
-                   row.names = FALSE)
-  utils::write.csv(pca_res$loadings,
-                   file.path(paths$results_tables, "pca_gene_loadings.csv"),
-                   row.names = FALSE)
-  utils::write.csv(pca_res$variance,
-                   file.path(paths$results_tables, "pca_variance_explained.csv"),
-                   row.names = FALSE)
-  utils::write.csv(pca_res$significance,
-                   file.path(paths$results_tables, "pca_pc1_significance.csv"),
-                   row.names = FALSE)
+  f3e_files <- c(scores       = "pca_subject_scores_f3e.csv",
+                 loadings     = "pca_gene_loadings_f3e.csv",
+                 variance     = "pca_variance_explained_f3e.csv",
+                 significance = "pca_pc1_significance_f3e.csv")
+  for (el in names(f3e_files))
+    utils::write.csv(pca_res[[el]],
+                     file.path(paths$results_tables, f3e_files[[el]]),
+                     row.names = FALSE)
+  log_message("  panel D: wrote pca_*_f3e.csv at floor ", f3e_floor,
+              " (canonical pca_*.csv, floor ",
+              .pca_min_cells(cfg, "myeloid"), ", left untouched for the bridge)")
 
   # Rebuild the per_sub list-of-lists shape the downstream scores + loadings
   # plots expect. PC1 == PC1_oriented (post-flip) per the historical contract.
@@ -705,6 +731,72 @@ suppressPackageStartupMessages({
                                    "v3_pseudobulk_pca_facets"),
                w = n_cols * panel_in + 2.5,
                h = n_rows * panel_in + 2)
+
+  # ---- 1b. Supplementary: the SAME projection with nothing withheld -------
+  supp <- tryCatch(
+    compute_per_substate_pca(
+      obj, min_cells_per_pb = 1L,
+      min_gene_count = as.integer(cpcfg$min_gene_count %||% 10L),
+      hvg_n          = as.integer(cpcfg$hvg_n %||% 2000L),
+      n_pcs          = as.integer(cpcfg$n_pcs %||% 5L),
+      vst_blind      = isTRUE(cpcfg$vst_blind),
+      pc1_split_fdr  = as.numeric(cpcfg$pc1_split_fdr %||% 0.05)),
+    error = function(e) { log_message("  panel D supp (all substates): ",
+                                      conditionMessage(e)); NULL })
+  if (!is.null(supp)) {
+    shown <- unique(as.character(scores_df$substate))
+    sdf <- supp$scores
+    sdf$substate <- as.character(sdf$substate)
+    nlab <- sdf |>
+      dplyr::group_by(.data$substate) |>
+      dplyr::summarise(n_niu = sum(.data$Phenotype_2 == "NIU"),
+                       n_vir = sum(.data$Phenotype_2 == "Viral"),
+                       .groups = "drop")
+    sdf <- dplyr::left_join(sdf, nlab, by = "substate")
+    sdf$substate_label <- paste0(
+      substate_labels(cfg, "myeloid", sdf$substate),
+      "\n(n = ", sdf$n_niu, " NIU, ", sdf$n_vir, " viral",
+      ifelse(sdf$substate %in% shown, "", "; BELOW FLOOR, not in main panel"),
+      ")")
+    sdf$etiology_label <- ifelse(sdf$Phenotype_2 == "NIU",
+                                 "Autoimmune (NIU)", "Viral")
+    p_supp <- ggplot2::ggplot(sdf, ggplot2::aes(.data$PC1_oriented, .data$PC2,
+                                                color = .data$etiology_label)) +
+      ggplot2::geom_hline(yintercept = 0, linetype = "dashed",
+                          linewidth = 0.25, color = "grey70") +
+      ggplot2::geom_vline(xintercept = 0, linetype = "dashed",
+                          linewidth = 0.25, color = "grey70") +
+      ggplot2::geom_point(size = 2.2, alpha = 0.9) +
+      ggplot2::stat_ellipse(level = 0.7,
+                            ggplot2::aes(group = .data$etiology_label),
+                            linewidth = 0.5) +
+      ggplot2::scale_color_manual(values = c(
+        "Autoimmune (NIU)" = unname(ETIOLOGY_GROUP_COLORS["NIU"]),
+        "Viral"            = unname(ETIOLOGY_GROUP_COLORS["Viral"]))) +
+      ggplot2::facet_wrap(~ .data$substate_label, scales = "free", ncol = 3) +
+      ggplot2::labs(
+        title = "Supplementary: per-substate pseudobulk PCA, ALL myeloid substates",
+        subtitle = paste0("Same projection as the main panel with the ",
+                          "pseudobulk floor removed. Facets marked BELOW FLOOR ",
+                          "are omitted from the main figure for insufficient ",
+                          "pseudobulks per group, not on the basis of result."),
+        x = "PC1 (oriented)", y = "PC2", color = NULL) +
+      ggplot2::theme_bw(base_size = 9) +
+      ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                     panel.grid.minor = ggplot2::element_blank(),
+                     strip.text = ggplot2::element_text(size = 7),
+                     aspect.ratio = 1)
+    n_f <- length(unique(sdf$substate_label))
+    save_pdf_png(p_supp, file.path(.myeloid_panelD_paths(paths),
+                                   "v3_pseudobulk_pca_facets_all_substates"),
+                 w = 3 * 3.0 + 2, h = ceiling(n_f / 3) * 3.0 + 2)
+    utils::write.csv(supp$significance,
+                     file.path(paths$results_tables,
+                               "pca_pc1_significance_all_substates.csv"),
+                     row.names = FALSE)
+    log_message("  panel D supp: ", n_f, " substates (main panel shows ",
+                length(shown), ")")
+  }
 
   # ---- 2. Loadings plot: signed bars of top genes on PC1 and PC2 ----------
   # Restrict to the substates with clean AI vs Viral separation on PC1
@@ -851,8 +943,7 @@ suppressPackageStartupMessages({
 # run_escape_custom_modules in 32_escape.R). Left = module x substate dotplot
 # faceted by etiology (size = fraction above threshold, color = mean UCell).
 # Right = subject-mean scatter of MHC-I vs MHC-II module scores with etiology
-# ellipses. Both use the same UCell scale so reviewers can't accuse the
-# panel of double-scoring. Also writes a Wilcoxon test of subject-mean
+# ellipses. Also writes a Wilcoxon test of subject-mean
 # MHC-I and MHC-II between AI and Viral to APC_module_etiology_test.csv.
 # ---------------------------------------------------------------------------
 .myeloid_apc_get_scores <- function(obj, cfg) {
