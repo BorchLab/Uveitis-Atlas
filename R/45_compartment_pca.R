@@ -24,6 +24,21 @@
 #   pca_pc1_significance.csv       one row per substate (Welch t + BH q)
 #   pc1_loadings_by_program.csv    one row per (substate, program, gene)
 #
+# Stress-sensitivity extension (2026-07-31). Three optional
+# arguments make the disease axis re-derivable with an acute-stress /
+# dissociation covariate removed:
+#   covariate_col   name of a per-(substate, sample) column carried on the
+#                   pseudobulk colData by build_per_substate_pseudobulks()
+#   covariate_mode  none | rbe_group_protected | rbe_naive | hvg_drop
+#   exclude_genes   gene vector for hvg_drop
+# All three default to the published behaviour, and .pca_adjust_matrix() returns
+# the input matrix untouched when covariate_mode == "none", so the published
+# path is provably unchanged. See .pca_adjust_matrix for why a DESeq2 design of
+# ~ covariate + group is NOT one of the offered arms.
+#
+# `pbs` lets a caller inject prebuilt pseudobulks so AggregateExpression is paid
+# for once (R/85 panel D; the 34-fold jackknife in R/46c).
+#
 # Compatibility note: matches the F3 inline implementation's conventions
 # exactly: DESeq2::vst(blind = FALSE, design = ~ group), HVG top-2000 by
 # rowVars, prcomp(scale. = TRUE), PC1 sign-flipped so the Viral centroid is
@@ -46,6 +61,103 @@ suppressPackageStartupMessages({
   as.integer(cpcfg[[key]] %||% 20L)
 }
 
+# Rank guard shared by every model-fitting site in the stress-sensitivity work.
+# In the eye arm Phenotype_2, Tissue_2 and Cohort are perfectly collinear
+# (23 aqueous/US/NIU samples vs 13 vitreous/Japan/Viral), so any design that
+# tries to hold two of them at once is unidentifiable. lm() would silently
+# return NA for the aliased term; we would rather stop.
+.assert_full_rank <- function(mm, what = "design") {
+  r <- qr(mm)$rank
+  if (r < ncol(mm))
+    stop(what, ": design is rank-deficient (rank ", r, " < ", ncol(mm),
+         " columns). In the eye arm Phenotype_2, Tissue_2 and Cohort are ",
+         "perfectly collinear; no categorical site adjustment is identifiable.",
+         call. = FALSE)
+  invisible(TRUE)
+}
+
+# Variance inflation of a continuous covariate against the group term. A
+# covariate that the group term already explains is a categorical adjustment
+# wearing a numeric costume: it inflates the group SE and yields a stable-
+# looking but meaningless coefficient. Callers abort above vif_abort.
+.covariate_vif <- function(cov, grp) {
+  ok <- is.finite(cov) & !is.na(grp)
+  if (sum(ok) < 4L || length(unique(grp[ok])) < 2L) return(NA_real_)
+  if (stats::sd(cov[ok]) <= .Machine$double.eps) return(Inf)
+  r2 <- suppressWarnings(
+    summary(stats::lm(cov[ok] ~ factor(as.character(grp[ok]))))$r.squared)
+  if (!is.finite(r2)) return(NA_real_)
+  if (r2 >= 1 - 1e-12) return(Inf)
+  1 / (1 - r2)
+}
+
+# Remove the stress axis from a vst matrix before HVG selection and prcomp.
+#
+# Modes:
+#   none                 return mat untouched (the published path)
+#   rbe_group_protected  fit expr ~ group + cov, subtract only the cov term.
+#                        Removes the WITHIN-group stress-associated variation,
+#                        which is the only identifiable component. Primary.
+#   rbe_naive            fit expr ~ 1 + cov, subtract the whole term including
+#                        the part shared with group. Under perfect group/site
+#                        confounding this deliberately deletes group signal, so
+#                        it is a worst-case bound, never a primary result.
+#   hvg_drop             drop the stress genes outright before variance ranking.
+#                        No over-correction risk, but blind to indirect effects
+#                        through correlated genes.
+#
+# Deliberately NOT offered: a DESeq2 design of ~ cov + group. vst(blind=FALSE)
+# uses the design only for dispersion estimation and does not residualize the
+# returned matrix, so that arm looks like an adjustment and does nothing.
+#
+# Returns list(mat=, status=, vif=, n_excluded=). status is "ok", "unadjusted"
+# (mode none) or a reason string; callers record it as arm_failed.
+.pca_adjust_matrix <- function(mat, grp, cov, mode,
+                               exclude_genes = NULL, vif_abort = 10) {
+  if (identical(mode, "none"))
+    return(list(mat = mat, status = "unadjusted", vif = NA_real_,
+                n_excluded = 0L))
+
+  if (identical(mode, "hvg_drop")) {
+    drop <- intersect(rownames(mat), unique(as.character(exclude_genes)))
+    if (length(drop) >= nrow(mat) - 10L)
+      return(list(mat = mat, status = "exclude_list_too_large",
+                  vif = NA_real_, n_excluded = length(drop)))
+    return(list(mat = mat[setdiff(rownames(mat), drop), , drop = FALSE],
+                status = "ok", vif = NA_real_, n_excluded = length(drop)))
+  }
+
+  if (!requireNamespace("limma", quietly = TRUE))
+    return(list(mat = mat, status = "limma_unavailable", vif = NA_real_,
+                n_excluded = 0L))
+  if (is.null(cov) || anyNA(cov) || length(cov) != ncol(mat))
+    return(list(mat = mat, status = "covariate_missing_or_ragged",
+                vif = NA_real_, n_excluded = 0L))
+  if (stats::sd(cov) <= .Machine$double.eps)
+    return(list(mat = mat, status = "covariate_zero_variance",
+                vif = NA_real_, n_excluded = 0L))
+
+  vif <- .covariate_vif(cov, grp)
+  if (is.finite(vif) && vif > vif_abort)
+    return(list(mat = mat, status = sprintf("near_aliased_vif_%.1f", vif),
+                vif = vif, n_excluded = 0L))
+
+  cov_z <- as.numeric(scale(cov))   # centered within substate
+  adj <- tryCatch({
+    if (identical(mode, "rbe_group_protected")) {
+      dm <- stats::model.matrix(~ factor(as.character(grp)))
+      .assert_full_rank(cbind(dm, cov_z), "pca rbe_group_protected")
+      limma::removeBatchEffect(mat, covariates = cov_z, design = dm)
+    } else {
+      limma::removeBatchEffect(mat, covariates = cov_z)
+    }
+  }, error = function(e) NULL)
+  if (is.null(adj))
+    return(list(mat = mat, status = "removeBatchEffect_failed",
+                vif = vif, n_excluded = 0L))
+  list(mat = adj, status = "ok", vif = vif, n_excluded = 0L)
+}
+
 # Heart of the module. Given a Seurat compartment object, run per-substate
 # pseudobulk PCA following the F3 convention. Returns a list with elements
 #   scores      tibble (substate, sample, n_cells, group, PC1..PC5, PC1_oriented)
@@ -65,24 +177,44 @@ compute_per_substate_pca <- function(obj,
                                      hvg_n             = 2000L,
                                      n_pcs             = 5L,
                                      vst_blind         = FALSE,
-                                     pc1_split_fdr     = 0.05) {
+                                     pc1_split_fdr     = 0.05,
+                                     covariate_col     = NULL,
+                                     covariate_mode    = c("none",
+                                                           "rbe_group_protected",
+                                                           "rbe_naive",
+                                                           "hvg_drop"),
+                                     exclude_genes     = NULL,
+                                     vif_abort         = 10,
+                                     pbs               = NULL) {
   if (!requireNamespace("DESeq2", quietly = TRUE))
     stop("compute_per_substate_pca: DESeq2 required.")
   if (!requireNamespace("matrixStats", quietly = TRUE))
     stop("compute_per_substate_pca: matrixStats required.")
+  covariate_mode <- match.arg(covariate_mode)
+  if (!identical(covariate_mode, "none") && is.null(covariate_col) &&
+      !identical(covariate_mode, "hvg_drop"))
+    stop("compute_per_substate_pca: covariate_mode='", covariate_mode,
+         "' requires covariate_col.")
 
   if (is.null(sample_col)) {
     sample_col <- if ("Subject_Timepoint" %in% colnames(obj[[]]))
                     "Subject_Timepoint" else "orig.ident"
   }
 
-  pbs <- build_per_substate_pseudobulks(
-    obj,
-    cluster_col      = cluster_col,
-    group_col        = group_col,
-    groups           = groups,
-    min_cells_per_pb = min_cells_per_pb
-  )
+  # pbs may be injected by a caller that already paid for AggregateExpression
+  # (R/85 panel D, and the leave-one-out jackknife in R/46c, which subsets a
+  # single cached build 34 times rather than re-aggregating per fold). When
+  # injected, min_cells_per_pb has already been applied by the builder.
+  if (is.null(pbs)) {
+    pbs <- build_per_substate_pseudobulks(
+      obj,
+      cluster_col      = cluster_col,
+      group_col        = group_col,
+      groups           = groups,
+      min_cells_per_pb = min_cells_per_pb,
+      covariate_cols   = covariate_col
+    )
+  }
   if (length(pbs) == 0) {
     log_message("  compute_per_substate_pca: no pseudobulks after floor=",
                 min_cells_per_pb, " filter; aborting.")
@@ -131,7 +263,12 @@ compute_per_substate_pca <- function(obj,
       next
     }
 
-    pca_res <- tryCatch({
+    # Per-(substate, sample) covariate, computed by the pseudobulk builder from
+    # exactly the cells that entered each column. Not a per-sample lookup.
+    cov_vec <- if (!is.null(covariate_col) && covariate_col %in% colnames(cd))
+                 as.numeric(cd[[covariate_col]]) else NULL
+
+    fit <- tryCatch({
       dds <- DESeq2::DESeqDataSetFromMatrix(
         countData = round(m),
         colData   = data.frame(group = grp),
@@ -139,15 +276,29 @@ compute_per_substate_pca <- function(obj,
       dds <- dds[rowSums(DESeq2::counts(dds)) > min_gene_count, ]
       vsd <- DESeq2::vst(dds, blind = vst_blind)
       mat <- SummarizedExperiment::assay(vsd)
+      # Adjust after the count filter and before variance ranking, so the HVG
+      # set itself reflects the adjustment rather than being chosen on the
+      # unadjusted matrix and only then de-stressed.
+      adj <- .pca_adjust_matrix(mat, grp, cov_vec, covariate_mode,
+                                exclude_genes = exclude_genes,
+                                vif_abort = vif_abort)
+      mat  <- adj$mat
       vars <- matrixStats::rowVars(mat)
       keep <- order(-vars)[seq_len(min(hvg_n, length(vars)))]
       mat  <- mat[keep, ]
-      stats::prcomp(t(mat), scale. = TRUE)
+      list(pca = stats::prcomp(t(mat), scale. = TRUE), adj = adj)
     }, error = function(e) {
       log_message("    PCA failed for substate ", ck, ": ", conditionMessage(e))
       NULL
     })
-    if (is.null(pca_res)) next
+    if (is.null(fit)) next
+    pca_res    <- fit$pca
+    adj_status <- fit$adj$status
+    adj_vif    <- fit$adj$vif
+    adj_nex    <- fit$adj$n_excluded
+    if (!identical(covariate_mode, "none") && !identical(adj_status, "ok"))
+      log_message("    PCA substate ", ck, ": arm '", covariate_mode,
+                  "' not applied (", adj_status, "); reporting UNADJUSTED.")
 
     # Sign orient so positive PC1 is the Viral centroid (matches F3 convention).
     grp_chr   <- as.character(grp)
@@ -210,7 +361,19 @@ compute_per_substate_pca <- function(obj,
       mean_Viral   = if (length(pc1_viral) > 0) mean(pc1_viral, na.rm = TRUE) else NA_real_,
       t_statistic  = NA_real_,
       df           = NA_real_,
-      p_value      = NA_real_
+      p_value      = NA_real_,
+      # Arm provenance. Carried on the significance table (not on scores) so
+      # the published four-column readers in R/85 / R/86 / R/88 are unaffected
+      # and every adjusted run is self-describing.
+      covariate_mode = covariate_mode,
+      covariate_col  = covariate_col %||% NA_character_,
+      arm_status     = adj_status,
+      arm_vif        = adj_vif,
+      arm_n_excluded = adj_nex,
+      # Centroid-based sign flip actually applied. Under adjustment a substate
+      # can lose its separation, at which point the flip is arbitrary; downstream
+      # concordance aligns to the published PC1 by correlation instead.
+      pc1_flip       = flip
     )
     if (length(pc1_niu) >= 3 && length(pc1_viral) >= 3) {
       tt <- tryCatch(stats::t.test(pc1_viral, pc1_niu, var.equal = FALSE),
@@ -246,7 +409,12 @@ compute_per_substate_pca <- function(obj,
 # compartment-specific floor, writes four CSVs, then optionally calls
 # .pc1_loadings_by_program when cfg$<target>_programs is defined.
 run_compartment_pca <- function(cfg,
-                                target = c("myeloid", "tcell", "bcell")) {
+                                target = c("myeloid", "tcell", "bcell"),
+                                covariate_col  = NULL,
+                                covariate_mode = "none",
+                                exclude_genes  = NULL,
+                                out_dir        = NULL,
+                                out_suffix     = "") {
   target <- match.arg(target)
   paths <- get_target_paths(cfg, target)
   obj_path <- file.path(paths$results_objects, "IntegratedSeuratObject.rds")
@@ -267,26 +435,28 @@ run_compartment_pca <- function(cfg,
     hvg_n            = as.integer(cpcfg$hvg_n %||% 2000L),
     n_pcs            = as.integer(cpcfg$n_pcs %||% 5L),
     vst_blind        = isTRUE(cpcfg$vst_blind),
-    pc1_split_fdr    = as.numeric(cpcfg$pc1_split_fdr %||% 0.05)
+    pc1_split_fdr    = as.numeric(cpcfg$pc1_split_fdr %||% 0.05),
+    covariate_col    = covariate_col,
+    covariate_mode   = covariate_mode,
+    exclude_genes    = exclude_genes,
+    vif_abort        = as.numeric(
+      (cfg$stress_sensitivity$collinearity$vif_abort) %||% 10)
   )
   if (is.null(res)) {
     log_message("compartment_pca[", target, "]: PCA returned nothing.")
     return(invisible(FALSE))
   }
 
-  ensure_dir(paths$results_tables)
-  utils::write.csv(res$scores,
-                   file.path(paths$results_tables, "pca_subject_scores.csv"),
-                   row.names = FALSE)
-  utils::write.csv(res$loadings,
-                   file.path(paths$results_tables, "pca_gene_loadings.csv"),
-                   row.names = FALSE)
-  utils::write.csv(res$variance,
-                   file.path(paths$results_tables, "pca_variance_explained.csv"),
-                   row.names = FALSE)
-  utils::write.csv(res$significance,
-                   file.path(paths$results_tables, "pca_pc1_significance.csv"),
-                   row.names = FALSE)
+  # out_dir / out_suffix let the sensitivity harness (R/46b) reuse this
+  # orchestration while writing to outputs/tables/stress_sensitivity/ instead of
+  # over the published CSVs. Defaults reproduce the published paths exactly.
+  tab_dir <- out_dir %||% paths$results_tables
+  ensure_dir(tab_dir)
+  fp <- function(stem) file.path(tab_dir, paste0(stem, out_suffix, ".csv"))
+  utils::write.csv(res$scores,       fp("pca_subject_scores"),      row.names = FALSE)
+  utils::write.csv(res$loadings,     fp("pca_gene_loadings"),       row.names = FALSE)
+  utils::write.csv(res$variance,     fp("pca_variance_explained"),  row.names = FALSE)
+  utils::write.csv(res$significance, fp("pca_pc1_significance"),    row.names = FALSE)
   log_message("compartment_pca[", target, "]: wrote ",
               nrow(res$scores), " sample rows, ",
               nrow(res$loadings), " gene rows, ",
