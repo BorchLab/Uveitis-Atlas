@@ -87,7 +87,9 @@ run_bcell_paired_eye_blood_metrics <- function(cfg) {
   }
 
   summ <- d |>
-    dplyr::group_by(Subject, Tissue_1, Phenotype_2) |>
+    # Etiology added 2026-08-01, mirroring R/55. Constant within Subject, so
+    # this widens the table without changing any existing row.
+    dplyr::group_by(Subject, Tissue_1, Phenotype_2, Etiology) |>
     dplyr::summarise(
       n_cells = dplyr::n(),
       shannon_evenness = .shannon_evenness(as.numeric(table(.data[[clone_col]]))),

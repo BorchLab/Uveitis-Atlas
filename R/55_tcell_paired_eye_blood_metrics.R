@@ -77,7 +77,12 @@ run_tcell_paired_eye_blood_metrics <- function(cfg) {
   }
 
   summ <- d |>
-    dplyr::group_by(Subject, Tissue_1, Phenotype_2) |>
+    # Etiology added 2026-08-01, which asks whether clonal
+    # expansion varies between NIU diagnoses. It was previously used only as a
+    # filter and never carried through, so the output could not be stratified.
+    # Etiology is constant within Subject, so adding it to the grouping changes
+    # no existing row, only widens the table.
+    dplyr::group_by(Subject, Tissue_1, Phenotype_2, Etiology) |>
     dplyr::summarise(
       n_cells = dplyr::n(),
       shannon_evenness =
