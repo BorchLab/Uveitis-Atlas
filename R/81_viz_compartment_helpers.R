@@ -842,11 +842,17 @@ read_per_substate_dge <- function(paths,
   tibble::as_tibble(df)
 }
 
+# covariate_cols: optional character vector of numeric meta.data columns. For 
+# each one, the mean over exactly the cells that formed each pseudobulk column 
+# is carried on the returned colData. This has to happen here, where the 
+# contributing cell index `idx` is already in hand — a per-sample lookup would 
+# be the wrong unit, since the pseudobulk unit is (substate x sample), not sample.
 build_per_substate_pseudobulks <- function(obj,
                                            cluster_col = "knn.leiden.cluster",
                                            group_col   = "Phenotype_2",
                                            groups      = c("NIU", "Viral"),
-                                           min_cells_per_pb = 10) {
+                                           min_cells_per_pb = 10,
+                                           covariate_cols = NULL) {
   if (!cluster_col %in% colnames(obj[[]])) return(list())
   meta <- obj[[]]
   sample_col <- if ("Subject_Timepoint" %in% colnames(meta))
@@ -897,6 +903,10 @@ build_per_substate_pseudobulks <- function(obj,
                         n_cells = 0L,
                         stringsAsFactors = FALSE)
 
+  covariate_cols <- intersect(as.character(covariate_cols %||% character(0)),
+                              colnames(obj_meta))
+  for (cvn in covariate_cols) pb_meta[[cvn]] <- NA_real_
+
   for (i in seq_len(nrow(pb_meta))) {
     cn <- pb_meta$col[i]
     idx <- which(col_lookup_a == cn | col_lookup_b == cn)
@@ -905,6 +915,12 @@ build_per_substate_pseudobulks <- function(obj,
     pb_meta$sample[i]  <- obj_meta$.pb_sample[idx[1]]
     pb_meta$group[i]   <- obj_meta$.pb_group[idx[1]]
     pb_meta$n_cells[i] <- length(idx)
+    # Unweighted cell mean. Pseudobulk counts are sums, so an nCount-weighted
+    # mean is arguably more faithful, but the two agree to well within the
+    # within-substate spread and the unweighted version is what the per-cell
+    # tables report.
+    for (cvn in covariate_cols)
+      pb_meta[[cvn]][i] <- mean(as.numeric(obj_meta[[cvn]][idx]), na.rm = TRUE)
   }
 
   keep_cols <- !is.na(pb_meta$cluster) & pb_meta$n_cells >= min_cells_per_pb
