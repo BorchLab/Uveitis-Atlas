@@ -3277,6 +3277,131 @@ viz_fig5_s5_motif_bridge <- function(cfg) {
 # (shared) or eye-restricted. Faceted NIU vs Viral. Companion to the S3
 # boxplots, requested for the supplement.
 # ---------------------------------------------------------------------------
+viz_fig5_s6_expansion_by_niu_diagnosis <- function(cfg) {
+  p <- .tcra_paths(cfg)
+  gini_csv <- file.path(p$tables_t, "tcell_paired_eye_blood_metrics.csv")
+  ovl_csv  <- file.path(p$tables_rep, "TCR_eye_blood_overlap.csv")
+  niu_set  <- as.character(cfg$etiology_groups$niu %||%
+                             c("Idiopathic", "HLA_B27", "VKH", "BSCR", "JIA", "SLE"))
+  pal <- if (exists("ETIOLOGY_NIU_DISTINCT_COLORS", inherits = TRUE))
+           ETIOLOGY_NIU_DISTINCT_COLORS else NULL
+
+  # n-labelled axis, ordered by sample size so the thin groups are visibly thin.
+  #
+  # `id` is the independence unit and must be supplied whenever the input has
+  # more than one row per subject. The Gini table has one row per
+  # (Subject, Tissue_1), so counting rows there would report 22 Idiopathic
+  # subjects instead of 11 and overstate every group by exactly the number of
+  # tissues.
+  lab_with_n <- function(v, id = NULL) {
+    n_by <- if (is.null(id)) table(v)
+            else vapply(split(id, v), function(x) length(unique(x)), integer(1))
+    n_by <- sort(n_by, decreasing = TRUE)
+    factor(paste0(v, "\n(n=", n_by[as.character(v)], ")"),
+           levels = paste0(names(n_by), "\n(n=", n_by, ")"))
+  }
+  # Name the groups the test actually used. "Kruskal-Wallis across diagnoses
+  # with n >= 3" reads like a six-group omnibus, when on this cohort only
+  # Idiopathic and HLA_B27 clear the floor and it is really a two-group
+  # comparison. Spelling out the members stops the caption overstating itself.
+  kw_exploratory <- function(value, grp, min_n = 3L) {
+    ok <- names(which(table(grp) >= min_n))
+    if (length(ok) < 2L)
+      return("only one diagnosis reaches n >= 3, so no across-diagnosis test is shown")
+    keep <- grp %in% ok
+    k <- tryCatch(stats::kruskal.test(value[keep] ~ factor(grp[keep]))$p.value,
+                  error = function(e) NA_real_)
+    sprintf("exploratory %s p = %.3g (%s only; other diagnoses n <= 2 and are shown but not tested)",
+            if (length(ok) == 2L) "Wilcoxon" else "Kruskal-Wallis",
+            k, paste(ok, collapse = " vs "))
+  }
+
+  # (a) Eye/blood sharing per NIU diagnosis. TCR_eye_blood_overlap.csv already
+  #     carries `etiology`, so this needs no upstream re-run.
+  if (file.exists(ovl_csv)) {
+    o <- utils::read.csv(ovl_csv, stringsAsFactors = FALSE)
+    o <- o[o$phenotype %in% "NIU" & o$etiology %in% niu_set, , drop = FALSE]
+    if (nrow(o) >= 4L) {
+      o$dx <- lab_with_n(o$etiology, o$subject)   # one row per subject already
+      long <- rbind(
+        data.frame(dx = o$dx, etiology = o$etiology,
+                   metric = "Eye clones also seen in blood",
+                   value = o$frac_eye_shared_with_blood, stringsAsFactors = FALSE),
+        data.frame(dx = o$dx, etiology = o$etiology,
+                   metric = "Morisita eye-blood overlap",
+                   value = o$morisita, stringsAsFactors = FALSE))
+      pa <- ggplot2::ggplot(long, ggplot2::aes(.data$dx, .data$value)) +
+        ggplot2::geom_boxplot(outlier.shape = NA, fill = NA, colour = "grey55",
+                              linewidth = 0.4) +
+        ggplot2::geom_jitter(ggplot2::aes(fill = .data$etiology), shape = 21,
+                             width = 0.12, height = 0, size = 3.4,
+                             stroke = 0.6, colour = "#E21F26", alpha = 0.95) +
+        ggplot2::facet_wrap(~ .data$metric, scales = "free_y") +
+        ggplot2::labs(
+          title = "Eye-blood clonal sharing by NIU sub-diagnosis",
+          subtitle = paste0("One point per subject, red outline = NIU. ",
+                            kw_exploratory(o$frac_eye_shared_with_blood, o$etiology),
+                            ". Four of six diagnoses have n <= 2; read as ",
+                            "descriptive."),
+          x = NULL, y = NULL) +
+        ggplot2::theme_bw(base_size = 10) +
+        ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                       plot.subtitle = ggplot2::element_text(size = 8),
+                       axis.text.x = ggplot2::element_text(size = 7),
+                       legend.position = "none")
+      if (!is.null(pal))
+        pa <- pa + ggplot2::scale_fill_manual(values = pal, na.value = "grey70")
+      save_pdf_png(pa, file.path(p$base, "fig5_s6_eye_blood_sharing_by_niu_dx"),
+                   w = 9, h = 5)
+    }
+  } else {
+    log_message("  fig5 s6: ", basename(ovl_csv), " not found.")
+  }
+
+  # (b) Expansion (Gini) per NIU diagnosis, split by tissue. Requires the
+  #     Etiology column added to R/55 on 2026-08-01; older CSVs lack it.
+  if (!file.exists(gini_csv)) {
+    log_message("  fig5 s6: ", basename(gini_csv), " not found.")
+    return(invisible(NULL))
+  }
+  g <- utils::read.csv(gini_csv, stringsAsFactors = FALSE)
+  if (!"Etiology" %in% colnames(g)) {
+    log_message("  fig5 s6: ", basename(gini_csv), " predates the Etiology ",
+                "column. Re-run steps_fig6$tcell_paired_metrics (R/55) to ",
+                "enable the per-diagnosis Gini panel.")
+    return(invisible(NULL))
+  }
+  g <- g[g$Phenotype_2 %in% "NIU" & g$Etiology %in% niu_set & !is.na(g$gini), ,
+         drop = FALSE]
+  if (nrow(g) < 4L) return(invisible(NULL))
+  g$Tissue_1 <- factor(g$Tissue_1, levels = c("Eye", "Blood"))
+  # Two rows per subject here (Eye and Blood), so count subjects, not rows.
+  g$dx <- lab_with_n(g$Etiology, g$Subject)
+  pb <- ggplot2::ggplot(g, ggplot2::aes(.data$dx, .data$gini)) +
+    ggplot2::geom_boxplot(outlier.shape = NA, fill = NA, colour = "grey55",
+                          linewidth = 0.4) +
+    ggplot2::geom_jitter(ggplot2::aes(fill = .data$Etiology), shape = 21,
+                         width = 0.10, height = 0, size = 3.4, stroke = 0.6,
+                         colour = "#E21F26", alpha = 0.95) +
+    ggplot2::facet_wrap(~ .data$Tissue_1) +
+    ggplot2::labs(
+      title = "Clonal expansion (Gini) by NIU sub-diagnosis and tissue",
+      subtitle = paste0("One point per subject, red outline = NIU. ",
+                        kw_exploratory(g$gini[g$Tissue_1 == "Eye"],
+                                       g$Etiology[g$Tissue_1 == "Eye"]),
+                        " (eye). Higher Gini = more expanded."),
+      x = NULL, y = "Gini coefficient") +
+    ggplot2::theme_bw(base_size = 10) +
+    ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                   plot.subtitle = ggplot2::element_text(size = 8),
+                   axis.text.x = ggplot2::element_text(size = 7),
+                   legend.position = "none")
+  if (!is.null(pal))
+    pb <- pb + ggplot2::scale_fill_manual(values = pal, na.value = "grey70")
+  save_pdf_png(pb, file.path(p$base, "fig5_s6_gini_by_niu_dx"), w = 9, h = 5)
+  invisible(NULL)
+}
+
 viz_fig5_s3b_eye_blood_clone_alluvial <- function(cfg) {
   p <- .tcra_paths(cfg)
   exp_csv <- file.path(p$tables_rep, "TCR_top_expanded_eye.csv")
@@ -3437,6 +3562,7 @@ run_visualizations_tcr_advanced <- function(cfg) {
   try(viz_fig5_s3b_eye_blood_clone_alluvial(cfg),   silent = FALSE)
   try(viz_fig5_s4_duration_clonality(cfg),          silent = FALSE)
   try(viz_fig5_s5_motif_bridge(cfg),                silent = FALSE)
+  try(viz_fig5_s6_expansion_by_niu_diagnosis(cfg),  silent = FALSE)
   log_message("viz_tcr_advanced complete.")
   invisible(TRUE)
 }

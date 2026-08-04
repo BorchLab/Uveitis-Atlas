@@ -53,7 +53,7 @@ suppressPackageStartupMessages({
 
 # --- PC1 folds --------------------------------------------------------------
 
-.lodo_pca <- function(cfg, target, folds, out_dir) {
+.lodo_pca <- function(cfg, target, folds, out_dir, floor = NULL) {
   p <- get_target_paths(cfg, target)
   op <- file.path(p$results_objects, "IntegratedSeuratObject.rds")
   if (!file.exists(op)) {
@@ -64,7 +64,7 @@ suppressPackageStartupMessages({
   obj <- readRDS(op)
   meta <- obj[[]]
   cpcfg <- cfg$compartment_pca %||% list()
-  floor <- .pca_min_cells(cfg, target)
+  floor <- as.integer(floor %||% .pca_min_cells(cfg, target))
   args <- list(min_cells_per_pb = floor,
                min_gene_count = as.integer(cpcfg$min_gene_count %||% 10L),
                hvg_n          = as.integer(cpcfg$hvg_n %||% 2000L),
@@ -99,7 +99,8 @@ suppressPackageStartupMessages({
       rows[[length(rows) + 1]] <- data.frame(
         dropped_etiology = eti, fold_class = folds$fold_class[i],
         n_subjects_dropped = folds$n_subjects[i],
-        target = target, substate = as.character(ss),
+        target = target, min_cells_per_pb = floor,
+        substate = as.character(ss),
         n_NIU = if (nrow(sa)) sa$n_NIU[1] else NA_integer_,
         n_Viral = if (nrow(sa)) sa$n_Viral[1] else NA_integer_,
         q_value = if (nrow(sa)) sa$q_value[1] else NA_real_,
@@ -183,14 +184,105 @@ suppressPackageStartupMessages({
   dplyr::bind_rows(rows)
 }
 
-# --- Entry point ------------------------------------------------------------
+
+viz_diagnosis_lodo <- function(cfg, dge = NULL, pca = NULL) {
+  out_dir <- .lodo_dir(cfg)
+  vd <- (cfg$paths_stress_sensitivity %||%
+           list(viz = "outputs/viz/stress_sensitivity"))$viz
+  ensure_dir(vd)
+  rd <- function(f) { p <- file.path(out_dir, f)
+                      if (file.exists(p)) utils::read.csv(p, stringsAsFactors = FALSE) }
+  dge <- dge %||% rd("lodo_eye_dge_concordance.csv")
+  pca <- pca %||% rd("lodo_pca_pc1.csv")
+  cls_pal <- c(informative = "#1B7837", majority_bound = "#E08214",
+               single_subject = "grey60")
+
+  # --- A. eye DGE agreement ------------------------------------------------
+  if (!is.null(dge) && nrow(dge)) {
+    d <- dge
+    d$lab <- paste0(d$dropped_etiology, "\n(-", d$n_subjects_dropped, " pts)")
+    long <- rbind(
+      data.frame(lab = d$lab, fold_class = d$fold_class,
+                 metric = "log2FC agreement (Spearman rho)",
+                 value = d$lfc_spearman, stringsAsFactors = FALSE),
+      data.frame(lab = d$lab, fold_class = d$fold_class,
+                 metric = "DEG set overlap (Jaccard)",
+                 value = d$deg_jaccard, stringsAsFactors = FALSE),
+      data.frame(lab = d$lab, fold_class = d$fold_class,
+                 metric = "Top 50 genes still significant",
+                 value = d$top50_retention, stringsAsFactors = FALSE))
+    long$lab <- factor(long$lab, levels = d$lab[order(-d$n_subjects_dropped)])
+    pa <- ggplot2::ggplot(long, ggplot2::aes(.data$lab, .data$value)) +
+      ggplot2::geom_col(ggplot2::aes(fill = .data$fold_class), width = 0.65) +
+      ggplot2::geom_hline(yintercept = 1, linetype = "dotted", colour = "grey40") +
+      ggplot2::geom_text(ggplot2::aes(label = sprintf("%.3f", .data$value)),
+                         vjust = -0.4, size = 2.6) +
+      ggplot2::facet_wrap(~ .data$metric) +
+      ggplot2::scale_fill_manual(values = cls_pal, name = "fold type") +
+      ggplot2::coord_cartesian(ylim = c(0, 1.12)) +
+      ggplot2::labs(
+        title = "Eye pseudobulk DGE, leave-one-diagnosis-out",
+        subtitle = paste("Agreement with the full NIU versus viral analysis",
+                         "after removing each NIU sub-diagnosis.",
+                         "\nOnly the green folds are true sensitivity tests.",
+                         "Dropping idiopathic removes over half the NIU arm and",
+                         "is a power bound."),
+        x = NULL, y = NULL) +
+      ggplot2::theme_bw(base_size = 9) +
+      ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                     plot.subtitle = ggplot2::element_text(size = 7.5),
+                     axis.text.x = ggplot2::element_text(size = 7),
+                     legend.position = "bottom")
+    save_pdf_png(pa, file.path(vd, "lodo_eye_dge_concordance"), w = 10, h = 4.8)
+  }
+
+  # --- B. per-substate PC1 separation grid ---------------------------------
+  if (!is.null(pca) && nrow(pca)) {
+    p <- pca[pca$separating_full %in% TRUE, , drop = FALSE]
+    if (nrow(p)) {
+      p$panel <- if ("min_cells_per_pb" %in% names(p))
+        paste0(p$target, " (floor ", p$min_cells_per_pb, ")") else p$target
+      p$state <- ifelse(is.na(p$separating), "not testable",
+                 ifelse(p$separating %in% TRUE, "still separates",
+                        "loses separation"))
+      p$lab <- paste0(p$dropped_etiology, "\n(-", p$n_subjects_dropped, ")")
+      p$lab <- factor(p$lab, levels = unique(
+        p$lab[order(-p$n_subjects_dropped)]))
+      pb <- ggplot2::ggplot(p, ggplot2::aes(.data$lab,
+                                            factor(.data$substate))) +
+        ggplot2::geom_tile(ggplot2::aes(fill = .data$state), colour = "white",
+                           linewidth = 0.6) +
+        ggplot2::geom_text(ggplot2::aes(label = ifelse(is.na(.data$q_value), "",
+                             ifelse(.data$q_value < 0.001, "<.001",
+                                    sprintf("%.3f", .data$q_value)))),
+                           size = 2.5) +
+        ggplot2::facet_wrap(~ .data$panel, scales = "free_y") +
+        ggplot2::scale_fill_manual(
+          values = c(`still separates` = "#CDE8CD",
+                     `loses separation` = "#E8453B",
+                     `not testable` = "grey85"), name = NULL) +
+        ggplot2::labs(
+          title = "Per-substate PC1 separation after dropping each NIU sub-diagnosis",
+          subtitle = paste("Restricted to substates that separate in the full",
+                           "data. Cell text is the BH q value."),
+          x = "dropped NIU sub-diagnosis (subjects removed)", y = "substate") +
+        ggplot2::theme_bw(base_size = 9) +
+        ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                       plot.subtitle = ggplot2::element_text(size = 7.5),
+                       axis.text.x = ggplot2::element_text(size = 7),
+                       panel.grid = ggplot2::element_blank(),
+                       legend.position = "bottom")
+      save_pdf_png(pb, file.path(vd, "lodo_pc1_separation_grid"), w = 10, h = 5.5)
+    }
+  }
+  invisible(NULL)
+}
 
 run_diagnosis_lodo <- function(cfg, targets = NULL) {
   targets <- as.character(targets %||% cfg$diagnosis_lodo$targets %||%
                             c("eye_dge", "myeloid", "tcell"))
   out_dir <- .lodo_dir(cfg)
   ensure_dir(out_dir)
-  log_message("=== diagnosis_lodo (Reviewer 1 Major 2) ===")
 
   paths_eye <- get_target_paths(cfg, "eye")
   f_pc <- file.path(paths_eye$results_tables, "stress_ucell_per_cell.csv")
@@ -222,14 +314,24 @@ run_diagnosis_lodo <- function(cfg, targets = NULL) {
     }
   }
 
+  jobs <- list()
+  for (tg in intersect(targets, c("myeloid", "tcell"))) {
+    fl <- .pca_min_cells(cfg, tg)
+    jobs[[length(jobs) + 1]] <- list(target = tg, floor = fl)
+    if (identical(tg, "myeloid")) {
+      f3e <- as.integer(
+        (cfg$compartment_pca$min_cells_per_subject_substate_myeloid_f3e) %||% fl)
+      if (!identical(f3e, fl))
+        jobs[[length(jobs) + 1]] <- list(target = tg, floor = f3e)
+    }
+  }
   pca <- dplyr::bind_rows(Filter(Negate(is.null), lapply(
-    intersect(targets, c("myeloid", "tcell")),
-    function(tg) .lodo_pca(cfg, tg, folds, out_dir))))
+    jobs, function(j) .lodo_pca(cfg, j$target, folds, out_dir, floor = j$floor))))
   if (nrow(pca)) {
     .sens_write(pca, out_dir, "lodo_pca_pc1")
     summ <- pca |>
       dplyr::filter(.data$separating_full %in% TRUE) |>
-      dplyr::group_by(.data$target, .data$substate) |>
+      dplyr::group_by(.data$target, .data$min_cells_per_pb, .data$substate) |>
       dplyr::summarise(
         n_folds = dplyr::n(),
         frac_folds_separating = mean(.data$separating %in% TRUE),
@@ -257,5 +359,8 @@ run_diagnosis_lodo <- function(cfg, targets = NULL) {
           100 * lost$frac_folds_separating[i], lost$worst_fold[i]))
     else log_message("  No separating substate depends on any single NIU sub-diagnosis.")
   }
+  tryCatch(viz_diagnosis_lodo(cfg),
+           error = function(e)
+             log_message("  lodo figures failed: ", conditionMessage(e)))
   invisible(list(folds = folds, pca = pca))
 }

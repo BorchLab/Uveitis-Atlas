@@ -91,6 +91,42 @@ suppressPackageStartupMessages({
   1 / (1 - r2)
 }
 
+# Variance-stabilise a pseudobulk count matrix, degrading gracefully instead of
+# failing.
+#
+# DESeq2::vst() fits its dispersion trend on a subsample of `nsub` genes with
+# mean normalized count > 5, and errors outright when a sparse substate cannot
+# supply them ("less than 'nsub' rows with mean normalized count > 5"). For the
+# well-populated substates that is never hit.
+#
+# The chain only ever engages AFTER the standard call has already errored, so
+# every substate that currently transforms successfully is untouched and the
+# published panels cannot move. Callers get `method` back so a fallback can be
+# labelled in the figure rather than passed off as an ordinary vst.
+.pca_vst_robust <- function(dds, blind = FALSE, min_gene_count = 10L) {
+  out <- function(m, meth) list(mat = m, method = meth)
+  r <- tryCatch(out(SummarizedExperiment::assay(DESeq2::vst(dds, blind = blind)),
+                    "vst"),
+                error = function(e) NULL)
+  if (!is.null(r)) return(r)
+  # Retry with a dispersion subsample small enough for a sparse substate.
+  n_ok <- sum(rowMeans(DESeq2::counts(dds, normalized = FALSE)) > 5)
+  r <- tryCatch(out(SummarizedExperiment::assay(
+                      DESeq2::vst(dds, blind = blind,
+                                  nsub = max(10L, min(1000L, n_ok - 1L)))),
+                    "vst_reduced_nsub"), error = function(e) NULL)
+  if (!is.null(r)) return(r)
+  # Full parametric VST: no nsub subsampling, slower but robust at small n.
+  r <- tryCatch(out(SummarizedExperiment::assay(
+                      DESeq2::varianceStabilizingTransformation(dds, blind = blind)),
+                    "vst_full"), error = function(e) NULL)
+  if (!is.null(r)) return(r)
+  # Last resort: log2 CPM. Not variance-stabilised, so label it in the figure.
+  m <- DESeq2::counts(dds, normalized = FALSE)
+  cs <- pmax(colSums(m), 1)
+  out(log2(sweep(m, 2, cs, "/") * 1e6 + 1), "log2cpm_fallback")
+}
+
 # Remove the stress axis from a vst matrix before HVG selection and prcomp.
 #
 # Modes:
@@ -185,6 +221,14 @@ compute_per_substate_pca <- function(obj,
                                                            "hvg_drop"),
                                      exclude_genes     = NULL,
                                      vif_abort         = 10,
+                                     # Minimum pseudobulk columns for a substate
+                                     # to be attempted. Default 4 preserves the
+                                     # published behaviour; the completeness
+                                     # supplement lowers it to 3 (prcomp needs
+                                     # >= 2, PC2 needs >= 3) so no cluster is
+                                     # dropped for being small.
+                                     min_pb_cols       = 4L,
+                                     robust_vst        = FALSE,
                                      pbs               = NULL) {
   if (!requireNamespace("DESeq2", quietly = TRUE))
     stop("compute_per_substate_pca: DESeq2 required.")
@@ -258,8 +302,9 @@ compute_per_substate_pca <- function(obj,
       cd <- pb$coldata; m <- pb$counts
     }
     grp <- factor(cd$group, levels = groups)
-    if (ncol(m) < 4 || length(unique(grp)) < 2) {
-      log_message("  PCA substate ", ck, ": <4 columns or single group; skipping.")
+    if (ncol(m) < min_pb_cols || length(unique(grp)) < 2) {
+      log_message("  PCA substate ", ck, ": <", min_pb_cols,
+                  " columns or single group; skipping.")
       next
     }
 
@@ -274,8 +319,13 @@ compute_per_substate_pca <- function(obj,
         colData   = data.frame(group = grp),
         design    = ~ group)
       dds <- dds[rowSums(DESeq2::counts(dds)) > min_gene_count, ]
-      vsd <- DESeq2::vst(dds, blind = vst_blind)
-      mat <- SummarizedExperiment::assay(vsd)
+      tr <- if (isTRUE(robust_vst))
+              .pca_vst_robust(dds, blind = vst_blind,
+                              min_gene_count = min_gene_count)
+            else list(mat = SummarizedExperiment::assay(
+                        DESeq2::vst(dds, blind = vst_blind)), method = "vst")
+      mat <- tr$mat
+      vst_method <- tr$method
       # Adjust after the count filter and before variance ranking, so the HVG
       # set itself reflects the adjustment rather than being chosen on the
       # unadjusted matrix and only then de-stressed.
@@ -286,7 +336,12 @@ compute_per_substate_pca <- function(obj,
       vars <- matrixStats::rowVars(mat)
       keep <- order(-vars)[seq_len(min(hvg_n, length(vars)))]
       mat  <- mat[keep, ]
-      list(pca = stats::prcomp(t(mat), scale. = TRUE), adj = adj)
+      # scale. = TRUE fails on any zero-variance gene, which small substates can
+      # produce after the fallback transform; drop those rather than lose the
+      # whole substate.
+      mat <- mat[matrixStats::rowVars(mat) > 0, , drop = FALSE]
+      list(pca = stats::prcomp(t(mat), scale. = TRUE), adj = adj,
+           vst_method = vst_method)
     }, error = function(e) {
       log_message("    PCA failed for substate ", ck, ": ", conditionMessage(e))
       NULL
@@ -370,6 +425,10 @@ compute_per_substate_pca <- function(obj,
       arm_status     = adj_status,
       arm_vif        = adj_vif,
       arm_n_excluded = adj_nex,
+      # "vst" for every substate on the published path. Anything else means the
+      # standard transform errored and a fallback was used, which only happens
+      # for the sparse substates the completeness supplement exists to show.
+      vst_method     = fit$vst_method %||% "vst",
       # Centroid-based sign flip actually applied. Under adjustment a substate
       # can lose its separation, at which point the flip is arbitrary; downstream
       # concordance aligns to the published PC1 by correlation instead.

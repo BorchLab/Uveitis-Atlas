@@ -612,6 +612,110 @@ suppressPackageStartupMessages({
 # Entry point
 # ---------------------------------------------------------------------------
 
+# Forest plot of the myeloid-to-T cell coupling under every stress adjustment.
+#
+# This is the panel for Reviewer 1 Major 1. The arms are ordered by how much
+# they are ALLOWED to remove, and read top to bottom as an argument:
+#
+#   published            r = 0.700, the baseline
+#   hvg_drop             stress genes removed from feature selection outright
+#   partial_cov          stress added as a subject-level nuisance covariate
+#   rbe_group_protected  the within-group stress axis regressed out of expression
+#   rbe_naive            the entire stress axis regressed out, including the part
+#                        confounded with disease group
+#
+# The first three leave the coupling where it was. The fourth attenuates it but
+# keeps it significant. The fifth destroys it, and is drawn deliberately because
+# under perfect group/site collinearity it removes disease signal by
+# construction. It is a bound, not a result, and the panel says so rather than
+# letting a reader treat five bars as five equivalent tests.
+viz_stress_bridge_arms <- function(cfg) {
+  sp <- .sens_paths(cfg)
+  bdir <- file.path(sp$tables, "bridge")
+  cov <- cfg$stress_sensitivity$primary_covariate %||% "stress_dissoc_pruned_ucell"
+  arms <- c(hvg_drop = "Stress genes dropped\nfrom feature selection",
+            partial_cov = "Stress as subject-level\ncovariate",
+            rbe_group_protected = "Within-group stress axis\nremoved from expression",
+            rbe_naive = "Entire stress axis removed\n(over-corrected bound)")
+  grab <- function(f, w) {
+    if (!file.exists(f)) return(NULL)
+    d <- utils::read.csv(f, stringsAsFactors = FALSE)
+    r <- d[grepl("^partial_controlling", d$stratum) & d$weighting == w, , drop = FALSE]
+    if (!nrow(r)) return(NULL)
+    data.frame(r = r$pearson_r[1], lo = r$pearson_ci_lo[1],
+               hi = r$pearson_ci_hi[1], p = r$permutation_p[1],
+               stringsAsFactors = FALSE)
+  }
+  rows <- list()
+  for (w in c("unweighted", "weighted")) {
+    pubf <- file.path((cfg$paths_cross_compartment %||%
+                         list(tables = "outputs/tables/cross_compartment"))$tables,
+                      "pc1_bridge_correlation.csv")
+    b <- grab(pubf, w)
+    if (!is.null(b)) rows[[length(rows) + 1]] <-
+      cbind(b, arm = "Published", weighting = w, kind = "baseline")
+    for (a in names(arms)) {
+      g <- grab(file.path(bdir, paste0("pc1_bridge_correlation_stressadj_", a,
+                                       "_", cov, ".csv")), w)
+      if (!is.null(g)) rows[[length(rows) + 1]] <-
+        cbind(g, arm = unname(arms[a]), weighting = w,
+              kind = if (identical(a, "rbe_naive")) "bound" else "adjusted")
+    }
+  }
+  if (!length(rows)) { log_message("  bridge arms figure: no inputs."); return(invisible(NULL)) }
+  d <- do.call(rbind, rows)
+  d$arm <- factor(d$arm, levels = rev(c("Published", unname(arms))))
+  d$sig <- ifelse(!is.na(d$p) & d$p < 0.05, "permutation p < 0.05", "not significant")
+
+  # Reference band PER FACET. The weighted and unweighted baselines differ
+  # (0.700 [0.439, 0.841] versus 0.632 [0.346, 0.793]), so a single annotate()
+  # would draw the unweighted interval behind the weighted arms and make them
+  # look further from their own baseline than they are.
+  ref <- d[d$arm == "Published", c("weighting", "r", "lo", "hi")]
+  names(ref) <- c("weighting", "ref_r", "ref_lo", "ref_hi")
+
+  p <- ggplot2::ggplot(d, ggplot2::aes(.data$r, .data$arm)) +
+    ggplot2::geom_rect(data = ref, inherit.aes = FALSE,
+                       ggplot2::aes(xmin = .data$ref_lo, xmax = .data$ref_hi,
+                                    ymin = -Inf, ymax = Inf),
+                       fill = "#397FB9", alpha = 0.10) +
+    ggplot2::geom_vline(data = ref, inherit.aes = FALSE,
+                        ggplot2::aes(xintercept = .data$ref_r),
+                        linetype = "dashed", colour = "#397FB9") +
+    ggplot2::geom_vline(xintercept = 0, colour = "grey60", linewidth = 0.3) +
+    ggplot2::geom_errorbarh(ggplot2::aes(xmin = .data$lo, xmax = .data$hi),
+                            height = 0.18, colour = "grey35") +
+    ggplot2::geom_point(ggplot2::aes(fill = .data$sig, shape = .data$kind),
+                        size = 3.2, colour = "grey20") +
+    ggplot2::geom_text(ggplot2::aes(label = sprintf("r = %.3f", .data$r)),
+                       vjust = -1.1, size = 2.7) +
+    ggplot2::scale_fill_manual(values = c(`permutation p < 0.05` = "#E21F26",
+                                          `not significant` = "white"),
+                               name = NULL) +
+    ggplot2::scale_shape_manual(values = c(baseline = 23, adjusted = 21,
+                                           bound = 25), name = NULL) +
+    ggplot2::facet_wrap(~ .data$weighting) +
+    ggplot2::labs(
+      title = "Myeloid to T cell PC1 coupling under dissociation-stress adjustment",
+      subtitle = paste(
+        "Partial correlation controlling for disease arm, with bootstrap 95% CI.",
+        "Blue band and dashed line are the published estimate and its interval.",
+        "\nThe lowest arm removes the whole stress axis including the part",
+        "confounded with disease group, which under this design removes disease",
+        "signal by construction. It is shown as a bound, not a result."),
+      x = "partial Pearson r", y = NULL) +
+    ggplot2::theme_bw(base_size = 9) +
+    ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                   plot.subtitle = ggplot2::element_text(size = 7),
+                   axis.text.y = ggplot2::element_text(size = 7.5),
+                   panel.grid.minor = ggplot2::element_blank(),
+                   legend.position = "bottom")
+  ensure_dir(sp$viz)
+  save_pdf_png(p, file.path(sp$viz, "stress_bridge_arms"), w = 10, h = 5)
+  .sens_write(d, sp$tables, "stress_bridge_arms_summary")
+  invisible(d)
+}
+
 run_stress_sensitivity <- function(cfg) {
   scfg <- cfg$stress_sensitivity %||% list()
   sp <- .sens_paths(cfg)
@@ -692,6 +796,10 @@ run_stress_sensitivity <- function(cfg) {
     return(invisible(FALSE))
   }
   .sens_write(verdict, sens_dir, "stress_sensitivity_verdict")
+
+  tryCatch(viz_stress_bridge_arms(cfg),
+           error = function(e)
+             log_message("  bridge-arms figure failed: ", conditionMessage(e)))
 
   # Global gate. Re-run the pipeline iff any GATING arm returns MATERIAL. F4E is
   # the mechanistic hinge of Figure 4, so it escalates on EQUIVOCAL too; the

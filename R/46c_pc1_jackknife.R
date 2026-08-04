@@ -47,7 +47,13 @@ suppressPackageStartupMessages({
   Filter(Negate(is.null), out)
 }
 
-.loo_pca <- function(cfg, target, jk_dir) {
+# floor is explicit because the myeloid compartment is displayed at two of them.
+# The canonical floor (20) is what the Figure 4E bridge consumes; the display
+# floor (10) is what Figure 3E shows, and those two floors mark DIFFERENT
+# substates as separating ({0,5} versus {1,2,4}). Running the jackknife only at
+# the canonical floor would leave every substate Figure 3E presents as a finding
+# untested, which is precisely the robustness question Reviewer 1 Major 3 asks.
+.loo_pca <- function(cfg, target, jk_dir, floor = NULL) {
   p <- get_target_paths(cfg, target)
   op <- file.path(p$results_objects, "IntegratedSeuratObject.rds")
   if (!file.exists(op)) {
@@ -57,7 +63,7 @@ suppressPackageStartupMessages({
   log_message("  jackknife[", target, "]: loading object")
   obj <- readRDS(op)
   cpcfg <- cfg$compartment_pca %||% list()
-  floor <- .pca_min_cells(cfg, target)
+  floor <- as.integer(floor %||% .pca_min_cells(cfg, target))
   pca_args <- list(
     min_gene_count = as.integer(cpcfg$min_gene_count %||% 10L),
     hvg_n          = as.integer(cpcfg$hvg_n %||% 2000L),
@@ -112,7 +118,8 @@ suppressPackageStartupMessages({
       rows[[length(rows) + 1]] <- data.frame(
         fold_subject = sbj,
         fold_group = unname(sample_to_group[drop[1]]),
-        target = target, substate = as.character(ss),
+        target = target, min_cells_per_pb = floor,
+        substate = as.character(ss),
         n_NIU = if (nrow(sa)) sa$n_NIU[1] else NA_integer_,
         n_Viral = if (nrow(sa)) sa$n_Viral[1] else NA_integer_,
         var_explained_PC1 = if (length(va)) va[1] else NA_real_,
@@ -188,6 +195,58 @@ suppressPackageStartupMessages({
   vd <- (cfg$paths_stress_sensitivity %||%
            list(viz = "outputs/viz/stress_sensitivity"))$viz
   ensure_dir(vd)
+  # Caterpillar plot: the ABSOLUTE partial r for every fold, with the full-data
+  # value as reference and permutation significance marked.
+  #
+  # The tornado below shows the CHANGE in r, which answers "which subject is
+  # most influential" but not "what is the range" or "is every fold still
+  # significant". Those are the two claims the response letter actually makes
+  # about Reviewer 1 Major 3, so they need a panel that states them directly.
+  if (!is.null(br_loo) && nrow(br_loo)) {
+    b <- br_loo
+    b$sig <- ifelse(!is.na(b$permutation_p) & b$permutation_p < 0.05,
+                    "permutation p < 0.05", "not significant")
+    rng <- b |>
+      dplyr::group_by(.data$weighting) |>
+      dplyr::summarise(full_r = .data$full_r[1],
+                       lo = min(.data$pearson_r, na.rm = TRUE),
+                       hi = max(.data$pearson_r, na.rm = TRUE),
+                       frac = mean(.data$permutation_p < 0.05, na.rm = TRUE),
+                       .groups = "drop")
+    sub <- paste(apply(rng, 1, function(z) sprintf(
+      "%s: full r = %.3f, folds %.3f to %.3f, %.0f%% significant",
+      z[["weighting"]], as.numeric(z[["full_r"]]), as.numeric(z[["lo"]]),
+      as.numeric(z[["hi"]]), 100 * as.numeric(z[["frac"]]))), collapse = "   |   ")
+    save_pdf_png(
+      ggplot(b, aes(.data$pearson_r,
+                    stats::reorder(.data$fold_subject, .data$pearson_r))) +
+        geom_vline(data = rng, aes(xintercept = .data$full_r),
+                   linetype = "dashed", colour = "#397FB9") +
+        geom_vline(xintercept = 0, colour = "grey70", linewidth = 0.3) +
+        geom_segment(data = rng, inherit.aes = FALSE,
+                     aes(x = .data$lo, xend = .data$hi, y = -Inf, yend = -Inf),
+                     colour = NA) +
+        geom_point(aes(fill = .data$sig, colour = .data$fold_group),
+                   shape = 21, size = 2.6, stroke = 0.9) +
+        scale_fill_manual(values = c(`permutation p < 0.05` = "#E8453B",
+                                     `not significant` = "white"), name = NULL) +
+        scale_colour_manual(values = c(NIU = "#E21F26", Viral = "#397FB9"),
+                            name = "subject dropped") +
+        facet_wrap(~ .data$weighting, scales = "free_x") +
+        labs(title = "Figure 4E partial correlation, leave-one-subject-out",
+             subtitle = paste0("Each point is the partial r with that subject ",
+                               "removed. Dashed line is the full-data value.\n",
+                               sub),
+             x = "partial Pearson r (subject removed)", y = NULL) +
+        theme_bw(base_size = 9) +
+        theme(plot.title = element_text(face = "bold"),
+              plot.subtitle = element_text(size = 7.5),
+              axis.text.y = element_text(size = 6.5),
+              legend.position = "bottom"),
+      file.path(vd, "pc1_bridge_loo_caterpillar"),
+      w = 9, h = max(4.5, 0.20 * length(unique(b$fold_subject)) + 2.5))
+  }
+
   if (!is.null(br_loo) && nrow(br_loo)) {
     d <- br_loo[br_loo$weighting == "unweighted", , drop = FALSE]
     if (nrow(d))
@@ -206,19 +265,11 @@ suppressPackageStartupMessages({
         file.path(vd, "pc1_bridge_loo_tornado"),
         w = 7, h = max(4, 0.22 * nrow(d) + 2))
   }
-  if (!is.null(pca_loo) && nrow(pca_loo))
-    save_pdf_png(
-      ggplot(pca_loo[pca_loo$separating_full %in% TRUE, , drop = FALSE],
-             aes(.data$substate, -log10(.data$q_value))) +
-        geom_jitter(width = 0.15, height = 0, size = 1.6, alpha = 0.7) +
-        geom_hline(yintercept = -log10(0.05), linetype = "dashed",
-                   colour = "#E21F26") +
-        facet_wrap(~ target, scales = "free_x") +
-        labs(title = "Per-substate PC1 significance across leave-one-out folds",
-             subtitle = "Restricted to substates that separate in the full data. Dashed line is q = 0.05.",
-             x = "substate", y = expression(-log[10](q))) +
-        theme_bw(base_size = 10),
-      file.path(vd, "pca_pc1_loo_stability"), w = 9, h = 4.5)
+  # The per-substate PC1 stability panel (pca_pc1_loo_stability) was dropped for
+  # the 2026 revision; it is not used in the manuscript. The underlying fold
+  # table and summary are still written to
+  # outputs/tables/stress_sensitivity/jackknife/, so the numbers remain
+  # available for the text.
   invisible(TRUE)
 }
 
@@ -313,31 +364,10 @@ run_pc1_floor_sensitivity <- function(cfg, floors = NULL) {
   sweep <- dplyr::bind_rows(rows)
   .sens_write(sweep, out_dir, "pc1_bridge_floor_sensitivity")
 
-  vd <- (cfg$paths_stress_sensitivity %||%
-           list(viz = "outputs/viz/stress_sensitivity"))$viz
-  ensure_dir(vd)
-  tryCatch(save_pdf_png(
-    ggplot(sweep, aes(.data$min_cells_per_pb, .data$partial_r)) +
-      geom_hline(yintercept = 0, colour = "grey60") +
-      geom_ribbon(aes(ymin = .data$ci_lo, ymax = .data$ci_hi), alpha = 0.18,
-                  fill = "#397FB9") +
-      geom_line(colour = "#397FB9") +
-      geom_point(aes(shape = .data$permutation_p < 0.05), size = 2.6,
-                 colour = "#397FB9") +
-      scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 1),
-                         name = "permutation p < 0.05") +
-      facet_wrap(~ weighting) +
-      scale_x_continuous(breaks = floors) +
-      labs(title = "Figure 4E coupling versus the myeloid pseudobulk floor",
-           subtitle = paste("Partial r controlling for Phenotype_2, with",
-                            "bootstrap 95% CI. Open points are not significant",
-                            "by the permutation null."),
-           x = "minimum cells per (subject, substate) pseudobulk",
-           y = "partial Pearson r") +
-      theme_bw(base_size = 10),
-    file.path(vd, "pc1_bridge_floor_sensitivity"), w = 9, h = 4.5),
-    error = function(e) log_message("  floor sweep figure failed: ",
-                                    conditionMessage(e)))
+  # The floor-sweep figure (pc1_bridge_floor_sensitivity) was dropped for the
+  # 2026 revision; it is not used in the manuscript. The sweep itself still runs
+  # and pc1_bridge_floor_sensitivity.csv is still written, so the floor
+  # dependence remains documented and quotable.
 
   for (i in seq_len(nrow(sweep)))
     log_message(sprintf(
@@ -450,14 +480,26 @@ run_pc1_jackknife <- function(cfg, targets = NULL) {
   ensure_dir(jk_dir)
   log_message("=== pc1_jackknife (leave-one-subject-out) ===")
 
+  # Myeloid is displayed at two floors, so it is jackknifed at both. Otherwise
+  # the substates Figure 3E marks as separating are never tested.
+  jobs <- list()
+  for (tg in intersect(targets, c("myeloid", "tcell"))) {
+    fl <- .pca_min_cells(cfg, tg)
+    jobs[[length(jobs) + 1]] <- list(target = tg, floor = fl)
+    if (identical(tg, "myeloid")) {
+      f3e <- as.integer(
+        (cfg$compartment_pca$min_cells_per_subject_substate_myeloid_f3e) %||% fl)
+      if (!identical(f3e, fl))
+        jobs[[length(jobs) + 1]] <- list(target = tg, floor = f3e)
+    }
+  }
   pca_loo <- dplyr::bind_rows(Filter(Negate(is.null), lapply(
-    intersect(targets, c("myeloid", "tcell")),
-    function(tg) .loo_pca(cfg, tg, jk_dir))))
+    jobs, function(j) .loo_pca(cfg, j$target, jk_dir, floor = j$floor))))
 
   if (nrow(pca_loo)) {
     .sens_write(pca_loo, jk_dir, "pca_pc1_loo_jackknife")
     summ <- pca_loo |>
-      dplyr::group_by(.data$target, .data$substate) |>
+      dplyr::group_by(.data$target, .data$min_cells_per_pb, .data$substate) |>
       dplyr::summarise(
         n_folds = dplyr::n(),
         separating_full = any(.data$separating_full %in% TRUE),

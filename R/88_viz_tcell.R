@@ -100,19 +100,21 @@ if (!requireNamespace("ggalluvial", quietly = TRUE)) {
   pal <- if (exists("ETIOLOGY_GROUP_COLORS", inherits = TRUE))
             ETIOLOGY_GROUP_COLORS else c(NIU = "#E21F26", Viral = "#397FB9")
 
-  p <- ggplot(scores, aes(.data$PC1_oriented, .data$PC2,
-                          color = .data$Phenotype_2)) +
+  scores$etiology_fill <- etiology_fill_label(
+    scores$Phenotype_2,
+    if (!is.null(scores$Etiology)) scores$Etiology else NA_character_)
+
+  p <- ggplot(scores, aes(.data$PC1_oriented, .data$PC2)) +
     geom_hline(yintercept = 0, linetype = "dashed",
                linewidth = 0.25, color = "grey70") +
     geom_vline(xintercept = 0, linetype = "dashed",
                linewidth = 0.25, color = "grey70") +
-    geom_point(size = 2.2, alpha = 0.9) +
-    stat_ellipse(level = 0.95, linewidth = 0.5,
-                 aes(group = .data$Phenotype_2)) +
-    scale_color_manual(values = pal, name = NULL) +
+    etiology_point_layers(ellipse_level = 0.95, point_size = 2.6) +
     facet_wrap(~ .data$substate_label, scales = "free", ncol = 2) +
     labs(title = "T cell per-substate pseudobulk PCA",
-         subtitle = "PC1 oriented so Viral centroid is positive",
+         subtitle = paste0("PC1 oriented so Viral centroid is positive. ",
+                           "Fill = clinical etiology, outline and ellipse = ",
+                           "disease arm."),
          x = "PC1", y = "PC2") +
     theme_bw(base_size = 10) +
     theme(plot.title    = element_text(face = "bold"),

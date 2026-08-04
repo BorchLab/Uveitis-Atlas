@@ -643,10 +643,15 @@ suppressPackageStartupMessages({
     if (is.null(sc) || is.null(ld) || is.null(vr) || nrow(sc) == 0L) return(NULL)
     list(
       substate = ck,
+      # `etiology` here has always meant Phenotype_2 (the NIU/Viral arm); the
+      # name is historical. Etiology_sub carries the actual clinical
+      # sub-diagnosis.
       scores   = data.frame(sample   = sc$sample,
                             PC1      = sc$PC1_oriented,
                             PC2      = sc$PC2,
                             etiology = sc$Phenotype_2,
+                            Etiology_sub = if (!is.null(sc$Etiology))
+                                             sc$Etiology else NA_character_,
                             stringsAsFactors = FALSE),
       loadings = data.frame(gene = ld$gene,
                             PC1  = ld$PC1_oriented,
@@ -694,28 +699,27 @@ suppressPackageStartupMessages({
   }))
   scores_df$substate_label <- factor(scores_df$substate_label,
                                      levels = sub_label_vec)
-  scores_df$etiology_label <- ifelse(scores_df$etiology == "NIU",
-                                     "Autoimmune (NIU)", "Viral")
+  # Fill encodes the NIU sub-diagnosis; the outline and the ellipse keep
+  # encoding the NIU/Viral arm, so a red ring and a red ellipse still mean
+  # exactly what they meant before
+  scores_df$Phenotype_2   <- scores_df$etiology
+  scores_df$etiology_fill <- etiology_fill_label(scores_df$Phenotype_2,
+                                                 scores_df$Etiology_sub)
 
   p_scores <- ggplot2::ggplot(scores_df,
-                              ggplot2::aes(.data$PC1, .data$PC2,
-                                           color = .data$etiology_label)) +
+                              ggplot2::aes(.data$PC1, .data$PC2)) +
     ggplot2::geom_hline(yintercept = 0, linetype = "dashed",
                         linewidth = 0.25, color = "grey70") +
     ggplot2::geom_vline(xintercept = 0, linetype = "dashed",
                         linewidth = 0.25, color = "grey70") +
-    ggplot2::geom_point(size = 2.2, alpha = 0.9) +
-    ggplot2::stat_ellipse(level = 0.7,
-                          ggplot2::aes(group = .data$etiology_label),
-                          linewidth = 0.5) +
-    ggplot2::scale_color_manual(values = c(
-      "Autoimmune (NIU)" = unname(ETIOLOGY_GROUP_COLORS["NIU"]),
-      "Viral"            = unname(ETIOLOGY_GROUP_COLORS["Viral"]))) +
+    etiology_point_layers(ellipse_level = 0.7, point_size = 2.6) +
     ggh4x::facet_wrap2(~ .data$substate_label, scales = "free", ncol = 2,
                        strip = facet_strip) +
     ggplot2::labs(title = "Per-substate pseudobulk PCA (DESeq2 vst)",
-                  subtitle = "PC1 oriented so Viral centroid is positive",
-                  x = "PC1", y = "PC2", color = NULL) +
+                  subtitle = paste0("PC1 oriented so Viral centroid is ",
+                                    "positive. Fill = clinical etiology, ",
+                                    "outline and ellipse = disease arm."),
+                  x = "PC1", y = "PC2") +
     ggplot2::theme_bw(base_size = 10) +
     ggplot2::theme(plot.title       = ggplot2::element_text(face = "bold"),
                    panel.grid.minor = ggplot2::element_blank(),
@@ -733,14 +737,19 @@ suppressPackageStartupMessages({
                h = n_rows * panel_in + 2)
 
   # ---- 1b. Supplementary: the SAME projection with nothing withheld -------
+  # Floor 2 rather than 1: single-cell pseudobulks are too sparse for DESeq2's
+  # dispersion fit and knocked out clusters 2, 3 and 8 entirely at floor 1.
+  # min_pb_cols = 3 and robust_vst = TRUE together are what let every cluster
+  # through, including 6 and 8, which is the whole point of this panel.
   supp <- tryCatch(
     compute_per_substate_pca(
-      obj, min_cells_per_pb = 1L,
+      obj, min_cells_per_pb = 2L,
       min_gene_count = as.integer(cpcfg$min_gene_count %||% 10L),
       hvg_n          = as.integer(cpcfg$hvg_n %||% 2000L),
       n_pcs          = as.integer(cpcfg$n_pcs %||% 5L),
       vst_blind      = isTRUE(cpcfg$vst_blind),
-      pc1_split_fdr  = as.numeric(cpcfg$pc1_split_fdr %||% 0.05)),
+      pc1_split_fdr  = as.numeric(cpcfg$pc1_split_fdr %||% 0.05),
+      min_pb_cols    = 3L, robust_vst = TRUE),
     error = function(e) { log_message("  panel D supp (all substates): ",
                                       conditionMessage(e)); NULL })
   if (!is.null(supp)) {
@@ -753,34 +762,37 @@ suppressPackageStartupMessages({
                        n_vir = sum(.data$Phenotype_2 == "Viral"),
                        .groups = "drop")
     sdf <- dplyr::left_join(sdf, nlab, by = "substate")
+    # Surface a fallback transform in the facet label. A reader comparing this
+    # panel with the main one should know which substates needed one.
+    meth <- stats::setNames(supp$significance$vst_method %||%
+                              rep("vst", nrow(supp$significance)),
+                            as.character(supp$significance$substate))
     sdf$substate_label <- paste0(
       substate_labels(cfg, "myeloid", sdf$substate),
       "\n(n = ", sdf$n_niu, " NIU, ", sdf$n_vir, " viral",
-      ifelse(sdf$substate %in% shown, "", "; BELOW FLOOR, not in main panel"),
+      ifelse(sdf$substate %in% shown, "", "; not in main panel"),
+      ifelse(meth[sdf$substate] %in% c("vst", NA), "",
+             paste0("; ", meth[sdf$substate])),
       ")")
-    sdf$etiology_label <- ifelse(sdf$Phenotype_2 == "NIU",
-                                 "Autoimmune (NIU)", "Viral")
-    p_supp <- ggplot2::ggplot(sdf, ggplot2::aes(.data$PC1_oriented, .data$PC2,
-                                                color = .data$etiology_label)) +
+    sdf$etiology_fill <- etiology_fill_label(sdf$Phenotype_2, sdf$Etiology)
+    p_supp <- ggplot2::ggplot(sdf, ggplot2::aes(.data$PC1_oriented, .data$PC2)) +
       ggplot2::geom_hline(yintercept = 0, linetype = "dashed",
                           linewidth = 0.25, color = "grey70") +
       ggplot2::geom_vline(xintercept = 0, linetype = "dashed",
                           linewidth = 0.25, color = "grey70") +
-      ggplot2::geom_point(size = 2.2, alpha = 0.9) +
-      ggplot2::stat_ellipse(level = 0.7,
-                            ggplot2::aes(group = .data$etiology_label),
-                            linewidth = 0.5) +
-      ggplot2::scale_color_manual(values = c(
-        "Autoimmune (NIU)" = unname(ETIOLOGY_GROUP_COLORS["NIU"]),
-        "Viral"            = unname(ETIOLOGY_GROUP_COLORS["Viral"]))) +
+      etiology_point_layers(ellipse_level = 0.7, point_size = 2.4) +
       ggplot2::facet_wrap(~ .data$substate_label, scales = "free", ncol = 3) +
       ggplot2::labs(
         title = "Supplementary: per-substate pseudobulk PCA, ALL myeloid substates",
-        subtitle = paste0("Same projection as the main panel with the ",
-                          "pseudobulk floor removed. Facets marked BELOW FLOOR ",
-                          "are omitted from the main figure for insufficient ",
-                          "pseudobulks per group, not on the basis of result."),
-        x = "PC1 (oriented)", y = "PC2", color = NULL) +
+        subtitle = paste(
+          "Every myeloid substate, including those the main panel omits.",
+          "Facets marked 'not in main panel' fall below its pseudobulk floor;",
+          "they are excluded there for power, not on the basis of result.",
+          "\nFacets marked vst_full used DESeq2's full variance-stabilising",
+          "transform because the default dispersion fit is not estimable at",
+          "that sample size. Fill = clinical etiology,",
+          "outline and ellipse = disease arm."),
+        x = "PC1 (oriented)", y = "PC2") +
       ggplot2::theme_bw(base_size = 9) +
       ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
                      panel.grid.minor = ggplot2::element_blank(),
