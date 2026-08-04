@@ -460,6 +460,199 @@
   rows[order(rows$fdr), ]
 }
 
+
+# This builds the answer table: one row per documented etiology, pairing it with
+# its matched VDJdb antigen and, critically, with how many reference records
+# exist to match against. That last column is what converts an uninterpretable
+# null into an explained one. It also returns the off-diagonal hits annotated
+# with the same coverage, which shows they track database depth rather than
+# biology.
+.vdjdb_q1_answer_table <- function(cfg, enrich, slim_path) {
+  matched <- c(VZV_ARN = "VZV", CMV_CRN = "CMV", HTLV1 = "HTLV-1",
+               HSV1 = "HSV-1", HSV2 = "HSV-2")
+  cov <- NULL
+  if (!is.na(slim_path) && file.exists(slim_path)) {
+    db <- utils::read.delim(slim_path, stringsAsFactors = FALSE,
+                            check.names = FALSE)
+    db <- db[db$species == "HomoSapiens", , drop = FALSE]
+    cov <- do.call(rbind, lapply(unique(c(matched, enrich$antigen_species)),
+      function(sp) {
+        k <- db$`antigen.species` == sp
+        data.frame(antigen_species = sp,
+                   db_records = sum(k),
+                   db_records_beta = sum(k & db$gene == "TRB"),
+                   db_epitopes = length(unique(db$`antigen.epitope`[k])),
+                   db_classI = sum(k & db$`mhc.class` == "MHCI"),
+                   db_classII = sum(k & db$`mhc.class` == "MHCII"),
+                   stringsAsFactors = FALSE)
+      }))
+  }
+
+  e <- enrich[enrich$subset == "all_T", , drop = FALSE]
+  e$matched_antigen <- unname(matched[e$etiology])
+  diag <- e[!is.na(e$matched_antigen) &
+              e$antigen_species == e$matched_antigen, , drop = FALSE]
+  if (nrow(diag) && !is.null(cov))
+    diag <- merge(diag, cov, by = "antigen_species", all.x = TRUE)
+  if (nrow(diag)) {
+    diag$question <- "documented infection vs matched VDJdb antigen"
+    # An etiology is only assessable if the database has something to match.
+    diag$assessable <- ifelse(is.na(diag$db_records_beta) |
+                                diag$db_records_beta < 100,
+                              "no: reference coverage too thin", "yes")
+    diag$answer <- ifelse(diag$assessable != "yes", "not assessable",
+                   ifelse(diag$n_hits_etiology == 0L, "no relation detected",
+                   ifelse(!is.na(diag$fdr) & diag$fdr < 0.05,
+                          "relation detected", "no relation detected")))
+    diag <- diag[order(-diag$n_etiology),
+                 c("etiology", "matched_antigen", "n_etiology",
+                   "n_hits_etiology", "db_records_beta", "db_epitopes",
+                   "db_classI", "db_classII", "OR_fisher", "p_fisher", "fdr",
+                   "status", "assessable", "answer")]
+  }
+
+  off <- e[!is.na(e$matched_antigen) & e$antigen_species != e$matched_antigen &
+             !is.na(e$fdr) & e$fdr < 0.05, , drop = FALSE]
+  if (nrow(off) && !is.null(cov)) off <- merge(off, cov, by = "antigen_species",
+                                               all.x = TRUE)
+  if (nrow(off)) {
+    off$question <- "off-diagonal hit (etiology does NOT match antigen)"
+    off <- off[order(off$fdr),
+               c("etiology", "antigen_species", "matched_antigen", "n_etiology",
+                 "n_hits_etiology", "db_records_beta", "db_epitopes",
+                 "OR_fisher", "fdr")]
+  }
+  list(matched = diag, off_diagonal = off, coverage = cov)
+}
+
+#
+# The point of the grid rather than a ranked list is that it shows the shape of
+# the result. If predicted specificity tracked documented infection, signal
+# would sit on the diagonal. Here the diagonal is empty and the only significant
+# cells are off it, which is the honest summary: no clear relation, and the
+# residual pattern is noise that follows reference-database depth rather than
+# patient etiology.
+#
+# Cells are one of four states, kept visually distinct because they mean very
+# different things:
+#   not in VDJdb    the matched antigen has no human records at all
+#   too few cells   etiology below the per-etiology cell floor
+#   tested, ns      a real test that found nothing
+#   tested, FDR<.05 a real test that found something (all off-diagonal here)
+.vdjdb_q1_fdr_matrix <- function(enrich, cov = NULL) {
+  matched <- c(VZV_ARN = "VZV", CMV_CRN = "CMV", HTLV1 = "HTLV-1",
+               HSV1 = "HSV-1", HSV2 = "HSV-2")
+  d <- enrich
+  d$matched_antigen <- unname(matched[d$etiology])
+  d$is_matched <- !is.na(d$matched_antigen) &
+                    d$antigen_species == d$matched_antigen
+  d$cell_state <- ifelse(d$status == "absent_in_db", "not in VDJdb",
+                  ifelse(d$status == "skipped_low_n", "too few cells",
+                  ifelse(!is.na(d$fdr) & d$fdr < 0.05, "tested, FDR < 0.05",
+                         "tested, not significant")))
+  d$neglog_fdr <- ifelse(is.na(d$fdr), NA_real_, -log10(pmax(d$fdr, 1e-30)))
+  d$label <- ifelse(d$status == "absent_in_db", "—",
+             ifelse(d$status == "skipped_low_n", "n/a",
+             ifelse(is.na(d$fdr), "",
+             ifelse(d$fdr < 0.001, sprintf("%.0e", d$fdr),
+                    sprintf("%.2f", d$fdr)))))
+  if (!is.null(cov))
+    d <- merge(d, cov[, c("antigen_species", "db_records_beta")],
+               by = "antigen_species", all.x = TRUE)
+  d
+}
+
+viz_vdjdb_q1_fdr_matrix <- function(cfg, enrich = NULL, cov = NULL,
+                                    out_dir = NULL) {
+  out_tab <- file.path(cfg$paths$results_tables, "repertoire")
+  if (is.null(enrich)) {
+    f <- file.path(out_tab, "vdjdb_etiology_enrichment.csv")
+    if (!file.exists(f)) { log_message("  q1 matrix: ", f, " missing."); return(invisible(NULL)) }
+    enrich <- utils::read.csv(f, stringsAsFactors = FALSE)
+  }
+  d <- .vdjdb_q1_fdr_matrix(enrich, cov)
+
+  # Wide FDR matrices, one per subset, for the supplement.
+  for (ss in unique(d$subset)) {
+    w <- d[d$subset == ss, c("etiology", "antigen_species", "fdr")]
+    m <- stats::reshape(w, idvar = "etiology", timevar = "antigen_species",
+                        direction = "wide")
+    names(m) <- sub("^fdr\\.", "", names(m))
+    utils::write.csv(m, file.path(out_tab,
+      paste0("vdjdb_q1_fdr_matrix_", ss, ".csv")), row.names = FALSE)
+  }
+  utils::write.csv(d, file.path(out_tab, "vdjdb_q1_fdr_matrix_long.csv"),
+                   row.names = FALSE)
+  log_message("  Saved: vdjdb_q1_fdr_matrix_{all_T,CD8_only,long}.csv")
+
+  if (!requireNamespace("ggplot2", quietly = TRUE)) return(invisible(d))
+  # Row / column labels carry the numbers that explain the pattern: cells per
+  # etiology on the rows, reference depth on the columns.
+  # Build the axis labels from per-key lookup tables, then order the factor
+  # levels from those same tables. An earlier version ordered with
+  # ifelse(<length-1 condition>, vec, 0), which returns a LENGTH-1 result and
+  # silently collapsed every column level to NA.
+  n_by_eti <- tapply(d$n_etiology, d$etiology,
+                     function(x) suppressWarnings(max(x, na.rm = TRUE)))
+  row_map <- stats::setNames(
+    paste0(names(n_by_eti), "\n(", format(n_by_eti, big.mark = ",", trim = TRUE),
+           " cells)"), names(n_by_eti))
+  d$row_lab <- factor(row_map[d$etiology],
+                      levels = row_map[names(sort(n_by_eti, decreasing = TRUE))])
+
+  sp <- sort(unique(d$antigen_species))
+  db_by_sp <- stats::setNames(rep(NA_real_, length(sp)), sp)
+  if ("db_records_beta" %in% names(d)) {
+    tmp <- tapply(d$db_records_beta, d$antigen_species,
+                  function(x) suppressWarnings(max(x, na.rm = TRUE)))
+    tmp[!is.finite(tmp)] <- NA_real_
+    db_by_sp[names(tmp)] <- as.numeric(tmp)
+  }
+  col_map <- stats::setNames(ifelse(
+    is.na(db_by_sp), sp,
+    paste0(sp, "\n(", format(db_by_sp, big.mark = ",", trim = TRUE), " TRB)")), sp)
+  ord <- names(sort(db_by_sp, decreasing = TRUE, na.last = TRUE))
+  d$col_lab <- factor(col_map[d$antigen_species], levels = col_map[ord])
+
+  pal <- c("not in VDJdb"            = "grey88",
+           "too few cells"           = "grey75",
+           "tested, not significant" = "#EAF2F8",
+           "tested, FDR < 0.05"      = "#E8453B")
+  p <- ggplot2::ggplot(d, ggplot2::aes(.data$col_lab, .data$row_lab)) +
+    ggplot2::geom_tile(ggplot2::aes(fill = .data$cell_state), colour = "white",
+                       linewidth = 0.6) +
+    # Box the diagonal: these are the only cells that answer the question.
+    ggplot2::geom_tile(data = d[d$is_matched, , drop = FALSE],
+                       fill = NA, colour = "black", linewidth = 1.1) +
+    ggplot2::geom_text(ggplot2::aes(label = .data$label), size = 2.7) +
+    ggplot2::scale_fill_manual(values = pal, name = NULL, drop = FALSE) +
+    ggplot2::facet_wrap(~ .data$subset) +
+    ggplot2::labs(
+      title = "Predicted antigen specificity versus documented ocular infection",
+      subtitle = paste(
+        "BH-FDR per (documented etiology x VDJdb antigen) Fisher test.",
+        "Black boxes mark the matched pairs that answer the question:",
+        "every one is untestable or FDR = 1.",
+        "\nAll significant cells are off-diagonal and sit on the three",
+        "best-covered reference species, so the residual pattern tracks",
+        "database depth rather than patient etiology."),
+      x = "VDJdb antigen species (human TRB records)",
+      y = "Documented ocular etiology (cells)") +
+    ggplot2::theme_bw(base_size = 9) +
+    ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                   plot.subtitle = ggplot2::element_text(size = 7.5),
+                   axis.text.x = ggplot2::element_text(angle = 45, hjust = 1,
+                                                       size = 7),
+                   axis.text.y = ggplot2::element_text(size = 7),
+                   panel.grid = ggplot2::element_blank(),
+                   legend.position = "bottom")
+  vd <- out_dir %||% file.path(get_target_paths(cfg, "eye")$viz_dir,
+                               VIZ_BUCKETS[["repertoire"]])
+  ensure_dir(vd)
+  save_pdf_png(p, file.path(vd, "vdjdb_q1_fdr_matrix"), w = 11, h = 6)
+  invisible(d)
+}
+
 run_vdjdb_annotation <- function(cfg) {
   if (!isTRUE(cfg$steps$vdjdb)) {
     log_message("VDJdb annotation disabled. Skipping.")
@@ -575,6 +768,20 @@ run_vdjdb_annotation <- function(cfg) {
     log_message("  Saved: vdjdb_etiology_enrichment.csv (",
                 nrow(etio_enrich), " rows)")
   }
+
+  tryCatch({
+    slim <- .vdjdb_cache(cfg)
+    q1 <- .vdjdb_q1_answer_table(cfg, etio_enrich, slim)
+    utils::write.csv(q1$matched,
+                     file.path(out_tables, "vdjdb_q1_matched_etiology.csv"),
+                     row.names = FALSE)
+    if (NROW(q1$off_diagonal))
+      utils::write.csv(q1$off_diagonal,
+                       file.path(out_tables, "vdjdb_q1_offdiagonal_hits.csv"),
+                       row.names = FALSE)
+    viz_vdjdb_q1_fdr_matrix(cfg, etio_enrich, q1$coverage)
+  }, error = function(e)
+    log_message("  vdjdb Q1 answer objects failed: ", conditionMessage(e)))
 
   if (have_tcell) { rm(obj_t); invisible(gc()) }
 

@@ -128,10 +128,15 @@ viz_cross_compartment_bridge <- function(cfg) {
     # ============================================================
     # Partial residual-residual scatter (controls for Phenotype_2)
     # ============================================================
-    rx <- tryCatch(stats::resid(stats::lm(df$myeloid_pc1 ~ df$Phenotype_2)),
+    # Residualize through the SAME helper R/46 uses for the reported statistic.
+    # This panel used to run its own lm(PC1 ~ Phenotype_2) pair, which meant the
+    # plotted residuals and the quoted partial r could silently disagree the
+    # first time either side changed.
+    rr <- tryCatch(.residualize_pc1(df$myeloid_pc1, df$tcell_pc1,
+                                    df$Phenotype_2),
                    error = function(e) NULL)
-    ry <- tryCatch(stats::resid(stats::lm(df$tcell_pc1   ~ df$Phenotype_2)),
-                   error = function(e) NULL)
+    rx <- if (!is.null(rr)) rr$rx else NULL
+    ry <- if (!is.null(rr)) rr$ry else NULL
     if (!is.null(rx) && !is.null(ry)) {
       df_p <- df
       df_p$resid_myeloid <- rx

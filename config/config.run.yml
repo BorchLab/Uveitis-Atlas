@@ -807,6 +807,12 @@ compartment_substate_labels:
 repertoire_top_n_eye: 20
 
 steps:
+  stress_qc: false                    # dissociation/acute-stress scoring (R/19)
+  stress_sensitivity: false           # stress-adjusted contrast harness (R/46b)
+  pc1_jackknife: false                # leave-one-subject-out on F3E/F4D/F4E (R/46c)
+  pc1_floor_sensitivity: false        # myeloid floor sweep for F4E (R/46c)
+  pc1_pair_stability: false           # F4F permutation-resolution ladder (R/46c)
+  diagnosis_lodo: false               # leave-one-diagnosis-out on the NIU arm (R/46d)
   ingest_data: false      # already done — per-sample QC objects exist
   airr_annotation: false
   integration: false
@@ -895,6 +901,7 @@ compartment_pca:
   # myeloid is sparser (~26 subjects, 14 NIU / 12 Viral) so it gets a
   # lower floor than T / B cell. See planning doc 2026-05-19 audit.
   min_cells_per_subject_substate_myeloid: 20
+  min_cells_per_subject_substate_myeloid_f3e: 10
   min_cells_per_subject_substate_tcell:   30
   # Dropped from 30 -> 10 (2026-05-27) to rescue cluster 2 Cycling plasmablast
   # in the PC1/PC2 panel. NIU still has 3 pbs at this floor; t-test on n=3 vs
@@ -914,6 +921,8 @@ cross_compartment_bridge:
   strata: ["pooled", "etiology"]
   n_bootstrap: 2000
   n_permutation: 1000
+  per_substate_n_bootstrap: 2000
+  per_substate_n_permutation: 1000
 
 liana:
   methods: ["natmi", "connectome", "logfc", "sca", "cellphonedb"]
@@ -1021,3 +1030,82 @@ steps_fig6:
   viz_bcell_fig6:              true
   viz_bcr_sharing_supp:        true
   viz_tcr_sharing_supp:        true
+
+# ---------------------------------------------------------------------------
+# Dissociation / acute-stress sensitivity suite
+# ---------------------------------------------------------------------------
+stress_qc:
+  seed: 42
+  ucell_maxrank: 1500          # recorded in the coverage table; see depth panel
+  min_genes_present: 3
+  min_frac_present: 0.5
+  primary_score: "stress_dissoc_pruned_ucell"
+  n_boot: 5000                 # subject-level AUC / Hedges g bootstrap
+  gene_sets:
+    ieg_core: ["FOS", "FOSB", "JUN", "JUNB", "EGR1",
+               "HSPA1A", "HSPA1B", "HSPB1", "DNAJB1"]
+
+stress_sensitivity:
+  primary_covariate: "stress_dissoc_pruned_ucell"
+  covariates: ["stress_dissoc_pruned_ucell", "stress_dissoc_ucell",
+               "stress_ieg_ucell"]
+  pca_arms: ["published", "rbe_group_protected", "rbe_naive", "hvg_drop"]
+  primary_pca_arm: "rbe_group_protected"
+  gating_arms: ["rbe_group_protected"]
+  targets: ["eye_dge", "myeloid_pca", "tcell_pca", "bridge",
+            "blood_replication"]
+  snapshot_published: true
+  n_bootstrap: 2000
+  n_permutation: 1000
+  collinearity:
+    vif_warn: 5.0
+    vif_abort: 10.0            # above this the arm is refused, not warned
+  criteria:
+    eye_dge:
+      lfc_spearman_minor: 0.90
+      lfc_spearman_material: 0.80
+      deg_jaccard_minor: 0.70
+      deg_jaccard_material: 0.50
+      sign_flip_rate_material: 0.02
+      top50_retention_minor: 0.80
+      top50_retention_material: 0.60
+      stress_gene_frac_minor: 0.05
+      stress_gene_frac_material: 0.15
+      named_genes: []
+    pca:
+      pc1_cor_minor: 0.85
+      pc1_cor_material: 0.60
+      pc1_cor_median_material: 0.70
+      separating_jaccard_minor: 0.80
+      separating_jaccard_material: 0.60
+      cohens_d_ratio_minor: 0.75
+      cohens_d_ratio_material: 0.50
+      cohens_d_rel_change_minor: 0.25
+      cohens_d_rel_change_material: 0.50
+      var_explained_delta_minor: 10
+      var_explained_delta_material: 20
+    bridge:
+      published_r_unweighted: 0.700
+      published_ci_lo_unweighted: 0.439
+      published_ci_hi_unweighted: 0.841
+      published_ci_lo_weighted: 0.346
+      delta_r_minor: 0.10
+      delta_r_material: 0.20
+      perm_p_material: 0.05
+      per_substate_spearman_minor: 0.85
+      per_substate_spearman_material: 0.70
+
+pc1_jackknife:
+  targets: ["myeloid", "tcell", "bridge"]
+  n_permutation: 1000
+  n_bootstrap: 0               # CIs are not the question for a LOO fold
+  min_fold_separating_frac: 0.90
+  min_abs_pc1_cor: 0.80
+  bridge_min_r: 0.40
+  bridge_min_frac_perm_p: 0.95
+  # Supplemental disclosure sweep for Reviewer 1 Major 3.
+  floor_sweep: [5, 10, 15, 20, 25, 30]
+
+paths_stress_sensitivity:
+  tables: "outputs/tables/stress_sensitivity"
+  viz:    "outputs/viz/stress_sensitivity"

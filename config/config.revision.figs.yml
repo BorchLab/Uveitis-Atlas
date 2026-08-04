@@ -1,3 +1,31 @@
+# config.revision.figs.yml — 2026-08-01 revision FIGURE pass.
+#
+# Derived from config.run.yml, with the figure set deliberately narrowed.
+#
+# EXPLICITLY OFF, so Figures 1 and 2 are never touched:
+#   visualize       -> writes outputs/viz/ root        (Figure 1, full atlas)
+#   eye_visualize   -> writes outputs/viz/eye/         (Figure 2, eye atlas)
+# Nothing in the revision changed their inputs, so there is no reason to
+# regenerate them and every reason not to.
+#
+# ON, because the revision changed their inputs or their code:
+#   compartment_visualize -> outputs/viz/eye/{myeloid,bcell,tcell}/
+#       F3E at the display floor, the new all-substates supplementary panel,
+#       and F4D. Also re-renders the Figure 6 B cell panels; harmless, and
+#       their per-group n is being quoted in the revision anyway.
+#   viz_cross_compartment -> outputs/viz/cross_compartment/
+#       F4E (now residualized through the shared helper) and F4F (per-pair
+#       CIs at 2000/1000 instead of 500/500).
+#   viz_tcr_advanced      -> outputs/viz/eye/tcell/09_tcr_motif/
+#       Figure 5D, which gains the red-symbol caption.
+#
+# Directory separation is what makes this safe: the compartment panels live in
+# their own subfolders under outputs/viz/eye/, so they cannot collide with the
+# Figure 2 panels at the outputs/viz/eye/ root.
+#
+# bcell_architecture_viz and every steps_fig6 flag are OFF: unchanged by the
+# revision, so not worth the risk or the runtime.
+
 # Reproducible config for Eye Blood Pairs pipeline
 
 seed: 42
@@ -261,7 +289,7 @@ escape:
   # (e.g. escape.APC) so it doesn't collide with the genome-wide ssGSEA
   # assay. Add new compartments under their own key; downstream viz reads
   # `custom_modules[[<key>]]` directly so renaming requires matching edits
-  # in R/85_viz_myeloid.R.
+  # in 73_/74_/75_viz_*.R.
   custom_modules:
     myeloid_apc:
       target_compartment: "myeloid"
@@ -321,13 +349,13 @@ olga:
   sonnia_epochs: 50
 
 # ---------------------------------------------------------------------------
-# Advanced TCR analyses (Phase 3e, modules R/67-R/71 + R/89)
+# Advanced TCR analyses (Phase 3e, modules R/67-R/71 + R/77)
 #   gliph_tcrdist        GLIPH vs tcrdist/clusTCR concordance (R/67)
 #   gliph_network        Dual-graph (binary + tcrdist) topology per cluster (R/68)
 #   vdjdb                VDJdb antigen annotation + per-substate enrichment (R/69)
 #   tcr_genex_signatures Expanded/public/GLIPH-enriched gene-expression linkage (R/70)
 #   gliph_motif_overlap  Suffix-prefix OLC assembly of GLIPH motifs (R/71)
-#   viz_tcr_advanced     One dispatcher for all of the above (R/89)
+#   viz_tcr_advanced     One dispatcher for all of the above (R/77)
 # ---------------------------------------------------------------------------
 tcr_advanced:
   vdjdb:
@@ -388,7 +416,7 @@ tcr_advanced:
   pseudobulk_min_cells: 20
 
   # ---------------------------------------------------------------------------
-  # Figure 5 panel-specific knobs (consumed by R/89 viz functions and R/79
+  # Figure 5 panel-specific knobs (consumed by R/77 viz functions and R/79
   # sharpened-bridge code). Three acts:
   #   Act 1 Antigen-specific landscape (panels A-D)
   #   Act 2 Novel autoimmune motifs       (panels E-H)
@@ -484,12 +512,6 @@ tcr_advanced:
         log_pgen:           0.6     # antigen selection (downweighted: noisy)
         LR_targeting:       0.5
         network_centrality: 0.3
-    # Supplemental Figure 5 panels (R/89 viz_fig5_s3b). The blood<->eye expanded
-    # -clone alluvial restricts to these phenotypes and counts an eye clone as
-    # "expanded" at >= expanded_clone_min_cells eye cells.
-    fig5_supp:
-      groups_keep: ["NIU", "Viral"]
-      expanded_clone_min_cells: 3
 
 composition:
   enable: true
@@ -813,6 +835,12 @@ compartment_substate_labels:
 repertoire_top_n_eye: 20
 
 steps:
+  stress_qc: false                    # dissociation/acute-stress scoring (R/19)
+  stress_sensitivity: false           # stress-adjusted contrast harness (R/46b)
+  pc1_jackknife: false                # leave-one-subject-out on F3E/F4D/F4E (R/46c)
+  pc1_floor_sensitivity: false        # myeloid floor sweep for F4E (R/46c)
+  pc1_pair_stability: false           # F4F permutation-resolution ladder (R/46c)
+  diagnosis_lodo: false               # leave-one-diagnosis-out on the NIU arm (R/46d)
   ingest_data: false      # already done — per-sample QC objects exist
   airr_annotation: false
   integration: false
@@ -825,9 +853,9 @@ steps:
   composition: false
   bcr_lineage: false
   # Figure 6 panels F + G + S6 (per-clone BCR architecture).
-  bcell_lineage_architecture: true
+  bcell_lineage_architecture: false
   bcell_baseline_selection: false  # gated; flip when shazam is installed
-  bcell_architecture_viz: true
+  bcell_architecture_viz: false
   visualize: false
   # NB: Ibex / Trex / encoder-benchmark / ibex_phylogeny / trex_neighborhood /
   # ibex_clone_size_feasibility / ibex_external_validation steps were removed
@@ -848,52 +876,45 @@ steps:
   clone_definition_sensitivity: false # → repertoire$clone_definition
   lineage_validation: false           # → eye_manual_overrides
   pseudobulk_N_audit: false           # → underpowered substate review
-  lineage_purity_audit: false         # per-cluster canonical-lineage purity audit (R/18)
-  stress_qc: false                    # dissociation/acute-stress scoring (R/19)
-  stress_sensitivity: false           # stress-adjusted contrast harness (R/46b)
-  pc1_jackknife: false                # leave-one-subject-out on F3E/F4D/F4E (R/46c)
-  pc1_floor_sensitivity: false        # myeloid floor sweep for F4E (R/46c)
-  pc1_pair_stability: false           # F4F permutation-resolution ladder (R/46c)
-  diagnosis_lodo: false               # leave-one-diagnosis-out on the NIU arm (R/46d)
   compartment_subset: false
   compartment_markers: false
-  compartment_dge: true
+  compartment_dge: false
   compartment_escape: false
   compartment_custom_modules: false   # curated UCell modules per compartment (panel F)
   compartment_composition: false
   compartment_milo: false
-  compartment_visualize: false
+  compartment_visualize: true
   # Cross-compartment LR signalling (panels G of F3/F4/F5). joint_substate is
   # cheap and still drives downstream multi-compartment viz; LIANA replaces
   # the prior CellChat module (retired 2026-05-19, see R/47).
-  joint_substate: true
+  joint_substate: false
   # --- Phase 1d (Figure 4 cross-compartment + bridge + LIANA) ---
-  compartment_pca: true            # per-substate pseudobulk PCA -> CSVs
-  cross_compartment_bridge: true    # subject-level myeloid PC1 vs T cell PC1
-  liana_myeloid_tcell: true         # rank-aggregated LR map per etiology
-  nichenet_myeloid_tcell: true      # ligand-activity prediction (default OFF)
-  viz_cross_compartment: false       # F4 panels F-H
-  eye_blood_repertoire: true
+  compartment_pca: false            # per-substate pseudobulk PCA -> CSVs
+  cross_compartment_bridge: false    # subject-level myeloid PC1 vs T cell PC1
+  liana_myeloid_tcell: false         # rank-aggregated LR map per etiology
+  nichenet_myeloid_tcell: false      # ligand-activity prediction (default OFF)
+  viz_cross_compartment: true       # F4 panels F-H
+  eye_blood_repertoire: false
   # --- TCR motif / distance / generation (Viral vs NIU intraocular) ---
   gliph: false
   tcrdist: false
   olga: false
   viz_tcr_compare: false
-  # --- Phase 3e: advanced TCR analyses (R/67-71 + R/89 viz) ---
+  # --- Phase 3e: advanced TCR analyses (R/67-71 + R/77 viz) ---
   # Re-enabled 2026-05-22 for Figure 5 production. Most outputs already
   # exist on disk; re-running tcr_genex_signatures is the one expensive
   # step (UCell + DESeq2 over ~70k T cells). viz_tcr_advanced + R/79 are
   # cheap and idempotent so they stay on for figure iteration.
   gliph_tcrdist: false             # GLIPH x tcrdist concordance (outputs exist)
   gliph_network: false             # dual-graph network metrics (outputs exist)
-  vdjdb: true                      # rerun 2026-05-22 after fuzzy_match: false flip
-  tcr_genex_signatures: true       # rerun to pick up new type_17 panel
+  vdjdb: false                      # rerun 2026-05-22 after fuzzy_match: false flip
+  tcr_genex_signatures: false       # rerun to pick up new type_17 panel
   gliph_motif_overlap: false       # OLC assembly (returns empty for this cohort;
                                    #   Panel H uses the motif_overlap_edges
-                                   #   fallback wired into R/89)
-  viz_tcr_advanced: true           # render all R/89 panels (Figure 5)
-  tcr_sharpened_bridge: true       # R/79: Panel K GLIPH-restricted PC1 bridge
-  novel_tcr_discovery: true        # R/80: score every GLIPH motif as a novel
+                                   #   fallback wired into R/77)
+  viz_tcr_advanced: true           # render all R/77 panels (Figure 5)
+  tcr_sharpened_bridge: false       # R/79: Panel K GLIPH-restricted PC1 bridge
+  novel_tcr_discovery: false        # R/80: score every GLIPH motif as a novel
                                    #   autoimmune-pathogenic TCR candidate
 
 # =============================================================================
@@ -904,9 +925,17 @@ steps:
 # =============================================================================
 
 compartment_pca:
+  # Floor for per-(subject, substate) pseudobulk inclusion. Asymmetric:
+  # myeloid is sparser (~26 subjects, 14 NIU / 12 Viral) so it gets a
+  # lower floor than T / B cell. See planning doc 2026-05-19 audit.
   min_cells_per_subject_substate_myeloid: 20
   min_cells_per_subject_substate_myeloid_f3e: 10
   min_cells_per_subject_substate_tcell:   30
+  # Dropped from 30 -> 10 (2026-05-27) to rescue cluster 2 Cycling plasmablast
+  # in the PC1/PC2 panel. NIU still has 3 pbs at this floor; t-test on n=3 vs
+  # n=7 is underpowered (flagged "(underpowered)" in F4_D-style panels) but
+  # the point cloud is visible. Clusters 3/4 stay dropped (0 NIU pbs at any
+  # floor) and the bridge correlations for those substates remain unavailable.
   min_cells_per_subject_substate_bcell:   10
   min_gene_count: 10
   vst_blind: false                  # match F3 inline convention (blind=FALSE)
@@ -922,6 +951,113 @@ cross_compartment_bridge:
   n_permutation: 1000
   per_substate_n_bootstrap: 2000
   per_substate_n_permutation: 1000
+
+liana:
+  methods: ["natmi", "connectome", "logfc", "sca", "cellphonedb"]
+  resource: "Consensus"
+  min_cells_per_cluster: 10
+  conditions: ["NIU", "Viral"]
+  source_regex: "^myeloid_"
+  target_regex: "^tcell_"
+  top_n_for_chord: 30
+  top_n_for_bias_dotplot: 30
+
+nichenet:
+  ligand_target_matrix_version: "v2_human"
+  lr_network_version: "v2_human"
+  geneset_size: 50
+  min_expression_fraction: 0.10
+  top_n_ligands: 20
+
+paths_cross_compartment:
+  tables: "outputs/tables/cross_compartment/"
+  viz:    "outputs/viz/cross_compartment/"
+
+# T cell PC1 receptor / effector program panel for F4 panel E (mirrors the
+# myeloid_programs block below). Each program is a curated gene list; the
+# .pc1_loadings_by_program helper writes one row per (substate, program,
+# gene) restricted to disease-separating substates.
+tcell_programs:
+  TCR_signal:        ["CD3D","CD3E","CD3G","ZAP70","LCK","LAT","ITK"]
+  CD4_CD8:           ["CD4","CD8A","CD8B"]
+  Costim_receptor:   ["CD28","ICOS","CD40LG","TNFRSF4","TNFRSF9","TNFRSF18"]
+  Checkpoint:        ["PDCD1","LAG3","TIGIT","HAVCR2","BTLA","CTLA4"]
+  Cytokine_receptor: ["IL23R","IFNGR1","IFNGR2","IL2RA","IL2RB","IL2RG","IL7R","IL6R","IL10RA"]
+  Effector_cytokine: ["IFNG","TNF","IL17F","IL17A","IL22","IL26","IL21","GZMH","GZMB","GZMA","GZMK","PRF1","GNLY"]
+  Chemokine_receptor: ["CXCR3","CXCR6","CCR4","CCR5","CCR6","CCR7","CXCR5"]
+  Tissue_residence: ["ITGA1","ITGAE","CD69","CXCR6","ZNF683","RUNX3"]
+  Transcription_factor: ["RORC","TBX21","GATA3","FOXP3","EOMES","BCL6","PRDM1","RUNX3"]
+
+# Myeloid PC1 sender program panel for F3 panel E (now also written out as a
+# canonical CSV via R/45_compartment_pca::.pc1_loadings_by_program).
+myeloid_programs:
+  HLA_I:    ["HLA-A","HLA-B","HLA-C","HLA-E","HLA-F","B2M"]
+  HLA_II:   ["HLA-DRA","HLA-DRB1","HLA-DPA1","HLA-DPB1","HLA-DQA1","HLA-DQB1","CIITA","CD74"]
+  CD1:      ["CD1A","CD1B","CD1C","CD1D","CD1E"]
+  Costim_ligand:     ["CD80","CD86","CD40","ICOSLG","TNFSF4","TNFSF9","TNFSF18"]
+  Checkpoint_ligand: ["CD274","PDCD1LG2","LGALS9","HHLA2","VTCN1"]
+  Cytokine:          ["IL12A","IL12B","IL23A","IL10","IL6","IL1B","TNF","IFNB1"]
+  Chemokine:         ["CXCL9","CXCL10","CXCL11","CCL2","CCL5","CCL7","CCL8","CCL18","CCL20","CCL22"]
+
+# =============================================================================
+# Figure 6 (B cell) additions — added 2026-05-24
+# =============================================================================
+
+# B cell ligand/receptor program panel. Mirrors `myeloid_programs` /
+# `tcell_programs` so .liana_classify_ligand_family() (R/47) can be reused for
+# B-side ligands/receptors. Consumed by R/49_liana_bcell.R and the Figure 6
+# LIANA dotplot panel (R/74).
+bcell_programs:
+  BAFF_APRIL_R:      ["TNFRSF13B","TNFRSF13C","TNFRSF17"]
+  Follicular_help_R: ["CXCR5","CD40","IL21R","ICOS"]
+  HLA_II:            ["HLA-DRA","HLA-DRB1","HLA-DPA1","HLA-DPB1","HLA-DQA1","HLA-DQB1","CD74"]
+  Costim_ligand:     ["CD80","CD86"]
+  Checkpoint_ligand: ["CD274","PDCD1LG2","LGALS9"]
+  Ig_class_switch:   ["AICDA","CD27","CD38","MS4A1","ITGAX","TBX21","FCRL4","FCRL5"]
+
+# LIANA — B cell-centered. Mirrors `liana:` (myeloid->tcell) but iterates
+# four directions and uses bcell_programs for family annotation on the B
+# side. Outputs land under outputs/tables/cross_compartment/ with file stems
+# liana_<source>_to_<target>_{NIU,Viral}.csv plus per-direction combined.
+liana_bcell:
+  methods: ["natmi","connectome","logfc","sca","cellphonedb"]
+  resource: "Consensus"
+  min_cells_per_cluster: 10
+  conditions: ["NIU","Viral"]
+  top_n_for_dotplot: 25
+  directions:
+    - {name: "myeloid_to_bcell", source_compartments: ["myeloid"], target_compartments: ["bcell"], source_regex: "^myeloid_", target_regex: "^bcell_"}
+    - {name: "tcell_to_bcell",   source_compartments: ["tcell"],   target_compartments: ["bcell"], source_regex: "^tcell_",   target_regex: "^bcell_"}
+    - {name: "bcell_to_tcell",   source_compartments: ["bcell"],   target_compartments: ["tcell"], source_regex: "^bcell_",   target_regex: "^tcell_"}
+    - {name: "bcell_to_myeloid", source_compartments: ["bcell"],   target_compartments: ["myeloid"], source_regex: "^bcell_", target_regex: "^myeloid_"}
+
+# Cross-subject fuzzy IGH "public" clones. Bucket on V gene + J gene +
+# CDR3-aa length, then single-link cluster within bucket by Hamming distance
+# threshold = floor(max_hamming_pct * L). Etiology-stratified by default.
+bcr_public:
+  enable: true
+  max_hamming_pct: 0.10
+  v_match: "gene"            # strip allele suffix
+  j_match: "gene"
+  min_cdr3_length: 10        # suppress short-junction convergent FPs
+  require_same_etiology: true
+  also_run_cross_etiology: true
+  min_subjects_per_cluster: 2
+  perm_null_iters: 100
+
+# =============================================================================
+# Figure 6 step toggles (gated by run_pipeline.R Phase 6)
+# =============================================================================
+steps_fig6:
+  bcell_paired_metrics:        false
+  tcell_paired_metrics:        false
+  bcell_lineage_trees:         false
+  liana_bcell:                 false
+  liana_supplemental_table:    false   # combine R/47 + R/49 combined CSVs
+  bcr_public_clones:           false
+  viz_bcell_fig6:              false
+  viz_bcr_sharing_supp:        false
+  viz_tcr_sharing_supp:        false
 
 # ---------------------------------------------------------------------------
 # Dissociation / acute-stress sensitivity suite
@@ -995,116 +1131,8 @@ pc1_jackknife:
   min_abs_pc1_cor: 0.80
   bridge_min_r: 0.40
   bridge_min_frac_perm_p: 0.95
-  # Supplemental disclosure sweep for Reviewer 1 Major 3.
   floor_sweep: [5, 10, 15, 20, 25, 30]
 
 paths_stress_sensitivity:
   tables: "outputs/tables/stress_sensitivity"
   viz:    "outputs/viz/stress_sensitivity"
-
-liana:
-  methods: ["natmi", "connectome", "logfc", "sca", "cellphonedb"]
-  resource: "Consensus"
-  min_cells_per_cluster: 10
-  conditions: ["NIU", "Viral"]
-  source_regex: "^myeloid_"
-  target_regex: "^tcell_"
-  top_n_for_chord: 30
-  top_n_for_bias_dotplot: 30
-
-nichenet:
-  ligand_target_matrix_version: "v2_human"
-  lr_network_version: "v2_human"
-  geneset_size: 50
-  min_expression_fraction: 0.10
-  top_n_ligands: 20
-
-paths_cross_compartment:
-  tables: "outputs/tables/cross_compartment/"
-  viz:    "outputs/viz/cross_compartment/"
-
-# T cell PC1 receptor / effector program panel for F4 panel E (mirrors the
-# myeloid_programs block below). Each program is a curated gene list; the
-# .pc1_loadings_by_program helper writes one row per (substate, program,
-# gene) restricted to disease-separating substates.
-tcell_programs:
-  TCR_signal:        ["CD3D","CD3E","CD3G","ZAP70","LCK","LAT","ITK"]
-  CD4_CD8:           ["CD4","CD8A","CD8B"]
-  Costim_receptor:   ["CD28","ICOS","CD40LG","TNFRSF4","TNFRSF9","TNFRSF18"]
-  Checkpoint:        ["PDCD1","LAG3","TIGIT","HAVCR2","BTLA","CTLA4"]
-  Cytokine_receptor: ["IL23R","IFNGR1","IFNGR2","IL2RA","IL2RB","IL2RG","IL7R","IL6R","IL10RA"]
-  Effector_cytokine: ["IFNG","TNF","IL17F","IL17A","IL22","IL26","IL21","GZMH","GZMB","GZMA","GZMK","PRF1","GNLY"]
-  Chemokine_receptor: ["CXCR3","CXCR6","CCR4","CCR5","CCR6","CCR7","CXCR5"]
-  Tissue_residence: ["ITGA1","ITGAE","CD69","CXCR6","ZNF683","RUNX3"]
-  Transcription_factor: ["RORC","TBX21","GATA3","FOXP3","EOMES","BCL6","PRDM1","RUNX3"]
-
-# Myeloid PC1 sender program panel for F3 panel E (now also written out as a
-# canonical CSV via R/45_compartment_pca::.pc1_loadings_by_program).
-myeloid_programs:
-  HLA_I:    ["HLA-A","HLA-B","HLA-C","HLA-E","HLA-F","B2M"]
-  HLA_II:   ["HLA-DRA","HLA-DRB1","HLA-DPA1","HLA-DPB1","HLA-DQA1","HLA-DQB1","CIITA","CD74"]
-  CD1:      ["CD1A","CD1B","CD1C","CD1D","CD1E"]
-  Costim_ligand:     ["CD80","CD86","CD40","ICOSLG","TNFSF4","TNFSF9","TNFSF18"]
-  Checkpoint_ligand: ["CD274","PDCD1LG2","LGALS9","HHLA2","VTCN1"]
-  Cytokine:          ["IL12A","IL12B","IL23A","IL10","IL6","IL1B","TNF","IFNB1"]
-  Chemokine:         ["CXCL9","CXCL10","CXCL11","CCL2","CCL5","CCL7","CCL8","CCL18","CCL20","CCL22"]
-
-# =============================================================================
-# Figure 6 (B cell) additions — added 2026-05-24
-# =============================================================================
-
-# B cell ligand/receptor program panel. Mirrors `myeloid_programs` /
-# `tcell_programs` so .liana_classify_ligand_family() (R/47) can be reused for
-# B-side ligands/receptors. Consumed by R/49_liana_bcell.R and the Figure 6
-# LIANA dotplot panel (R/86_viz_bcell.R).
-bcell_programs:
-  BAFF_APRIL_R:      ["TNFRSF13B","TNFRSF13C","TNFRSF17"]
-  Follicular_help_R: ["CXCR5","CD40","IL21R","ICOS"]
-  HLA_II:            ["HLA-DRA","HLA-DRB1","HLA-DPA1","HLA-DPB1","HLA-DQA1","HLA-DQB1","CD74"]
-  Costim_ligand:     ["CD80","CD86"]
-  Checkpoint_ligand: ["CD274","PDCD1LG2","LGALS9"]
-  Ig_class_switch:   ["AICDA","CD27","CD38","MS4A1","ITGAX","TBX21","FCRL4","FCRL5"]
-
-# LIANA — B cell-centered. Mirrors `liana:` (myeloid->tcell) but iterates
-# four directions and uses bcell_programs for family annotation on the B
-# side. Outputs land under outputs/tables/cross_compartment/ with file stems
-# liana_<source>_to_<target>_{NIU,Viral}.csv plus per-direction combined.
-liana_bcell:
-  methods: ["natmi","connectome","logfc","sca","cellphonedb"]
-  resource: "Consensus"
-  min_cells_per_cluster: 10
-  conditions: ["NIU","Viral"]
-  top_n_for_dotplot: 25
-  directions:
-    - {name: "myeloid_to_bcell", source_compartments: ["myeloid"], target_compartments: ["bcell"], source_regex: "^myeloid_", target_regex: "^bcell_"}
-    - {name: "tcell_to_bcell",   source_compartments: ["tcell"],   target_compartments: ["bcell"], source_regex: "^tcell_",   target_regex: "^bcell_"}
-    - {name: "bcell_to_tcell",   source_compartments: ["bcell"],   target_compartments: ["tcell"], source_regex: "^bcell_",   target_regex: "^tcell_"}
-    - {name: "bcell_to_myeloid", source_compartments: ["bcell"],   target_compartments: ["myeloid"], source_regex: "^bcell_", target_regex: "^myeloid_"}
-
-# Cross-subject fuzzy IGH "public" clones. Bucket on V gene + J gene +
-# CDR3-aa length, then single-link cluster within bucket by Hamming distance
-# threshold = floor(max_hamming_pct * L). Etiology-stratified by default.
-bcr_public:
-  enable: true
-  max_hamming_pct: 0.10
-  v_match: "gene"            # strip allele suffix
-  j_match: "gene"
-  min_cdr3_length: 10        # suppress short-junction convergent FPs
-  require_same_etiology: true
-  also_run_cross_etiology: true
-  min_subjects_per_cluster: 2
-  perm_null_iters: 100
-
-# =============================================================================
-# Figure 6 step toggles (gated by run_pipeline.R Phase 6)
-# =============================================================================
-steps_fig6:
-  bcell_paired_metrics:        true
-  tcell_paired_metrics:        true
-  bcell_lineage_trees:         true
-  liana_bcell:                 true
-  liana_supplemental_table:    true   # combine R/47 + R/49 combined CSVs
-  bcr_public_clones:           true
-  viz_bcell_fig6:              true
-  viz_tcr_sharing_supp:        true
-  check_architecture:          false  # Fig 6 F/G/S6 schema regression check (warns)

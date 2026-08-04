@@ -22,6 +22,7 @@ source("R/15_lens_qc.R")
 source("R/16_compartment_lineage_gate.R")
 source("R/17_lineage_validation.R")
 source("R/18_lineage_purity_audit.R")
+source("R/19_stress_qc.R")
 
 # --- Eye subset + compartments ---------------------------------------------
 source("R/20_subset_eye.R")
@@ -38,6 +39,9 @@ source("R/41_composition.R")
 # --- Compartment PCA + cross-compartment ligand-receptor -------------------
 source("R/45_compartment_pca.R")
 source("R/46_cross_compartment_bridge.R")
+source("R/46b_stress_sensitivity.R")
+source("R/46c_pc1_jackknife.R")
+source("R/46d_diagnosis_lodo.R")
 source("R/47_liana_myeloid_tcell.R")
 source("R/48_nichenet_myeloid_tcell.R")
 source("R/49_liana_bcell.R")
@@ -131,6 +135,7 @@ if (isTRUE(cfg$steps$pseudobulk_N_audit)) {
   for (tgt in c("myeloid", "bcell", "tcell")) run_pseudobulk_N_audit(cfg, target = tgt)
 }
 if (isTRUE(cfg$steps$lineage_purity_audit)) run_lineage_purity_audit(cfg)
+if (isTRUE(cfg$steps$stress_qc)) run_stress_qc(cfg)
 
 if (isTRUE(cfg$steps$compartment_subset)) subset_compartments(cfg)
 for (cmp in c("myeloid", "bcell", "tcell")) {
@@ -161,6 +166,11 @@ if (isTRUE(cfg$steps$compartment_pca)) {
 }
 if (isTRUE(cfg$steps$cross_compartment_bridge))  run_cross_compartment_pc1_bridge(cfg)
 if (isTRUE(cfg$steps$cross_compartment_bridge))  run_bcell_cross_compartment_bridge(cfg)
+if (isTRUE(cfg$steps$stress_sensitivity))        run_stress_sensitivity(cfg)
+if (isTRUE(cfg$steps$pc1_jackknife))             run_pc1_jackknife(cfg)
+if (isTRUE(cfg$steps$pc1_floor_sensitivity))     run_pc1_floor_sensitivity(cfg)
+if (isTRUE(cfg$steps$pc1_pair_stability))        run_pc1_pair_stability(cfg)
+if (isTRUE(cfg$steps$diagnosis_lodo))            run_diagnosis_lodo(cfg)
 if (isTRUE(cfg$steps$liana_myeloid_tcell))       run_liana_myeloid_tcell(cfg)
 if (isTRUE(cfg$steps$nichenet_myeloid_tcell))    run_nichenet_myeloid_to_tcell(cfg)
 if (isTRUE(cfg$steps$viz_cross_compartment))     run_visualizations(cfg, target = "cross_compartment")

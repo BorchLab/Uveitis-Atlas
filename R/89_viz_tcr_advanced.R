@@ -1620,8 +1620,7 @@ viz_fig5_c_hla_b27_per_subject <- function(cfg) {
 # selection) space, colored by composite candidate rank. Labels every motif
 # above a -log10(FDR) threshold (config knob) instead of the top-N by
 # composite rank, so the points that visibly stand out get named. Dashed
-# reference lines mark where the known HLA-B27 pathogenic motif sits so
-# reviewers can see novel candidates relative to that benchmark.
+# reference lines mark where the known HLA-B27 pathogenic motif sits
 viz_fig5_f_tcrdist_niu_vs_vdjdb <- function(cfg, top_n = 10L) {
   p <- .tcra_paths(cfg)
   cand <- .fig5_load_candidates(cfg)
@@ -2348,6 +2347,14 @@ viz_fig5_i_clone_group_lr_with_b27 <- function(cfg) {
   }
   clu_levels <- sort(unique(as.character(clones$dominant_tcell_cluster)))
   clu_pal <- setNames(paired_pal_n(length(clu_levels)), clu_levels)
+  # Recode opaque etiology codes (VZV_ARN, CMV_CRN) to reader-friendly labels
+  # via config fig5_supp$panel_i_etiology_labels before building the palette.
+  eti_labels_map <- cfg$tcr_advanced$fig5_supp$panel_i_etiology_labels
+  if (!is.null(eti_labels_map)) {
+    clones$disease_predom <- vapply(
+      as.character(clones$disease_predom),
+      function(x) eti_labels_map[[x]] %||% x, character(1), USE.NAMES = FALSE)
+  }
   eti_levels <- sort(unique(as.character(clones$disease_predom)))
   eti_pal <- setNames(cat_pal_n(length(eti_levels)), eti_levels)
   pub_pal <- c(`Public` = "#222222", `Private` = "grey80")
@@ -2360,10 +2367,11 @@ viz_fig5_i_clone_group_lr_with_b27 <- function(cfg) {
   size_col <- circlize::colorRamp2(
     stats::quantile(clones$n_cells, c(0, 0.5, 1), na.rm = TRUE),
     viridisLite::inferno(3))
-  # Overall rank: low (best) = black, high (worst) = white.
+  # Candidate rank: best (rank 1) = saturated green, worst = pale grey, so the
+  # top candidates read as the most salient rows. 
   rank_col <- circlize::colorRamp2(
     range(clones$clone_rank, na.rm = TRUE),
-    c("black", "white"))
+    c("#1B7837", "grey88"))
 
   # Row labels on the LEFT; row annotation block on the LEFT too so the
   # chips sit next to the CDR3 labels.
@@ -2372,13 +2380,13 @@ viz_fig5_i_clone_group_lr_with_b27 <- function(cfg) {
     `Public clone`       = ifelse(clones$is_public, "Public", "Private"),
     `Dominant cluster`   = clones$dominant_tcell_cluster,
     `Clone size (cells)` = clones$n_cells,
-    `Overall rank`       = clones$clone_rank,
+    `Candidate rank (1=best)` = clones$clone_rank,
     col = list(
       `Disease predom.`    = eti_pal,
       `Public clone`       = pub_pal,
       `Dominant cluster`   = clu_pal,
       `Clone size (cells)` = size_col,
-      `Overall rank`       = rank_col),
+      `Candidate rank (1=best)` = rank_col),
     annotation_name_gp   = grid::gpar(fontsize = 8, fontface = "bold"),
     annotation_name_side = "top",
     annotation_width = grid::unit(c(0.45, 0.45, 0.45, 0.45, 0.45), "cm"),
@@ -2663,10 +2671,15 @@ viz_fig5_d_alluvial_by_antigen_class <- function(cfg) {
       subtitle = paste0("Clone-level traces (per CTstrict). Antigen class ",
                         "from VDJdb (>=10 hits/species) + HLA-B27 pathogenic ",
                         "motif (TRAV21 + [YF]S[TS]). 'Unannotated' = neither."),
+      caption  = paste0("Ribbon colour is antigen class. Dark red (#9D0208) is ",
+                        "the HLA-B27 pathogenic motif class, the same colour ",
+                        "used for B27 membership in Fig 5F and 5G; red ",
+                        "(#B2182B) is SARS-CoV-2. Grey is unannotated."),
       y = "Clones") +
     ggplot2::theme_classic(base_size = 11) +
     ggplot2::theme(plot.title    = ggplot2::element_text(face = "bold"),
                    plot.subtitle = ggplot2::element_text(size = 9),
+                   plot.caption  = ggplot2::element_text(size = 8, hjust = 0),
                    axis.title.x  = ggplot2::element_blank())
   save_pdf_png(pD, file.path(p$base,
                              "fig5_d_alluvial_by_antigen_class"),
@@ -2675,13 +2688,29 @@ viz_fig5_d_alluvial_by_antigen_class <- function(cfg) {
 }
 
 # ---------------------------------------------------------------------------
-# Supplemental: blood<->eye sharing of expanded TCR clones (alluvial).
-# Strata are the two tissues (Blood, Eye); each ribbon is one expanded eye TCR
-# clone, coloured by whether it is also detected in the paired blood (shared)
-# or eye-restricted. Each disease group is normalised to 100% so NIU and Viral
-# are comparable on one axis, with a per-subject Wilcoxon test on the shared
-# fraction. Reads outputs/tables/repertoire/TCR_top_expanded_eye.csv.
+# Top-level dispatcher
 # ---------------------------------------------------------------------------
+# ===========================================================================
+# Figure 5 SUPPLEMENTAL panels (collaborator-driven). See config fig5_supp.
+# Each reads on-disk tables; lineage (CD4/CD8/Cycling) is derived from the
+# integer Leiden cluster via the config cd8/cd4/cycling key lists so the
+# definition matches cd8_substate_keys used everywhere else in the pipeline.
+# ===========================================================================
+
+# Map integer T cell cluster ids -> CD4 / CD8 / Cycling / Other using the
+# config fig5_supp key lists ("tcell_1" form). Defaults mirror config.yml:364.
+.fig5_supp_lineage <- function(cluster_ids, cfg) {
+  sup <- cfg$tcr_advanced$fig5_supp
+  cd8 <- sup$cd8_cluster_keys     %||% c("tcell_1", "tcell_3")
+  cd4 <- sup$cd4_cluster_keys     %||% c("tcell_0", "tcell_2", "tcell_4")
+  cyc <- sup$cycling_cluster_keys %||% c("tcell_5")
+  keys <- paste0("tcell_", as.character(cluster_ids))
+  out <- rep("Other", length(keys))
+  out[keys %in% cd4] <- "CD4"
+  out[keys %in% cd8] <- "CD8"
+  out[keys %in% cyc] <- "Cycling"
+  out
+}
 
 # Per-subject Phenotype_2 lookup from the sample metadata (one row/subject).
 .fig5_supp_subject_pheno <- function(cfg) {
@@ -2691,6 +2720,686 @@ viz_fig5_d_alluvial_by_antigen_class <- function(cfg) {
   md <- utils::read.csv(md_path, stringsAsFactors = FALSE, check.names = TRUE)
   if (!all(c("Subject", "Phenotype_2") %in% colnames(md))) return(NULL)
   dplyr::distinct(md[, c("Subject", "Phenotype_2")])
+}
+
+# ---------------------------------------------------------------------------
+# S1 — Antigen-specific CD4/CD8 lineage composition, viral vs autoimmune.
+# ---------------------------------------------------------------------------
+viz_fig5_s1_antigen_lineage_composition <- function(cfg) {
+  p <- .tcra_paths(cfg)
+  ann_csv <- file.path(p$tables_rep, "vdjdb_annotations.csv")
+  tcell_rds <- file.path(get_target_paths(cfg, "tcell")$results_objects,
+                         "IntegratedSeuratObject.rds")
+  if (!file.exists(ann_csv) || !file.exists(tcell_rds)) {
+    log_message("  viz_fig5_s1: vdjdb_annotations or T cell object missing; skipping.")
+    return(invisible(NULL))
+  }
+  groups_keep <- cfg$tcr_advanced$fig5_supp$groups_keep %||% c("NIU", "Viral")
+  min_hits <- cfg$tcr_advanced$fig5_supp$min_species_hits %||% 10L
+
+  obj <- readRDS(tcell_rds)
+  meta <- obj@meta.data
+  meta$barcode <- colnames(obj)
+  meta$lineage <- .fig5_supp_lineage(meta$knn.leiden.cluster, cfg)
+  rm(obj); invisible(gc())
+
+  vdjdb <- utils::read.csv(ann_csv, stringsAsFactors = FALSE)
+  vdjdb <- dplyr::distinct(vdjdb, .data$barcode, .data$antigen_species)
+  vdjdb <- vdjdb[vdjdb$barcode %in% meta$barcode, , drop = FALSE]
+  if (nrow(vdjdb) == 0) {
+    log_message("  viz_fig5_s1: no annotated cells on the T cell object; skipping.")
+    return(invisible(NULL))
+  }
+  mref <- meta[, c("barcode", "lineage", "Phenotype_2")]
+
+  # One row per annotated cell (lineage bar + Fisher use unique cells).
+  cells <- dplyr::left_join(
+    dplyr::distinct(vdjdb, .data$barcode), mref, by = "barcode")
+  cells <- cells[cells$Phenotype_2 %in% groups_keep, , drop = FALSE]
+  cells$group <- factor(dplyr::recode(as.character(cells$Phenotype_2),
+                                      NIU = "Autoimmune", Viral = "Viral"),
+                        levels = c("Autoimmune", "Viral"))
+  cells$lineage <- factor(cells$lineage, levels = c("CD8", "CD4", "Cycling", "Other"))
+
+  # 2x2 Fisher: CD8 vs not, Autoimmune vs Viral.
+  tab <- table(CD8 = ifelse(cells$lineage == "CD8", "CD8", "non-CD8"),
+               group = cells$group)
+  ft <- tryCatch(stats::fisher.test(tab), error = function(e) NULL)
+  fstr <- if (is.null(ft)) "Fisher: NA" else
+    sprintf("Fisher p = %.3g, OR = %.2f (CD8 enrichment, Viral vs Autoimmune)",
+            ft$p.value, unname(ft$estimate))
+  cd8_keys <- cfg$tcr_advanced$fig5_supp$cd8_cluster_keys %||% c("tcell_1", "tcell_3")
+
+  pct <- cells |>
+    dplyr::count(.data$group, .data$lineage, name = "n") |>
+    dplyr::group_by(.data$group) |>
+    dplyr::mutate(frac = .data$n / sum(.data$n)) |>
+    dplyr::ungroup()
+  n_lab <- dplyr::count(cells, .data$group, name = "n")
+
+  lin_pal <- c(CD8 = "#B2182B", CD4 = "#2166AC", Cycling = "#F4A300",
+               Other = "grey70")
+  pA <- ggplot2::ggplot(pct, ggplot2::aes(.data$group, .data$frac,
+                                          fill = .data$lineage)) +
+    ggplot2::geom_col(width = 0.7, color = "white", linewidth = 0.2) +
+    ggplot2::geom_text(data = n_lab,
+                       ggplot2::aes(x = .data$group, y = 1.02,
+                                    label = paste0("n=", .data$n)),
+                       inherit.aes = FALSE, vjust = 0, size = 3.2) +
+    ggplot2::scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                                expand = ggplot2::expansion(add = c(0, 0.08))) +
+    ggplot2::scale_fill_manual(values = lin_pal, name = "Lineage") +
+    ggplot2::labs(
+      title = "Antigen-specific T cell lineage by disease group",
+      subtitle = paste0(fstr, "\nCD8 = ", paste(cd8_keys, collapse = " + "),
+                        " (Cytotoxic CD8 + Effector memory TRM)"),
+      x = NULL, y = "Fraction of VDJdb-annotated cells") +
+    ggplot2::theme_classic(base_size = 11) +
+    ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                   plot.subtitle = ggplot2::element_text(size = 8))
+  save_pdf_png(pA, file.path(p$base, "fig5_s1_antigen_lineage_composition"),
+               w = 5.5, h = 5.5)
+
+  # Per-species facet: a cell appears in each species it matches.
+  sp_long <- dplyr::left_join(vdjdb, mref, by = "barcode")
+  sp_long <- sp_long[sp_long$Phenotype_2 %in% groups_keep, , drop = FALSE]
+  sp_n <- table(sp_long$antigen_species)
+  keep_sp <- names(sp_n)[sp_n >= min_hits]
+  sp_long <- sp_long[sp_long$antigen_species %in% keep_sp, , drop = FALSE]
+  out_csv <- pct
+  if (nrow(sp_long) > 0) {
+    sp_long$group <- factor(dplyr::recode(as.character(sp_long$Phenotype_2),
+                                          NIU = "Autoimmune", Viral = "Viral"),
+                            levels = c("Autoimmune", "Viral"))
+    sp_long$lineage <- factor(sp_long$lineage,
+                              levels = c("CD8", "CD4", "Cycling", "Other"))
+    sp_pct <- sp_long |>
+      dplyr::count(.data$antigen_species, .data$group, .data$lineage, name = "n") |>
+      dplyr::group_by(.data$antigen_species, .data$group) |>
+      dplyr::mutate(frac = .data$n / sum(.data$n)) |>
+      dplyr::ungroup()
+    pB <- ggplot2::ggplot(sp_pct, ggplot2::aes(.data$group, .data$frac,
+                                               fill = .data$lineage)) +
+      ggplot2::geom_col(width = 0.72, color = "white", linewidth = 0.2) +
+      ggplot2::facet_wrap(~ .data$antigen_species, nrow = 1) +
+      ggplot2::scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+      ggplot2::scale_fill_manual(values = lin_pal, name = "Lineage") +
+      ggplot2::labs(title = "Antigen-specific lineage by species and disease group",
+                    x = NULL, y = "Fraction of annotated cells") +
+      ggplot2::theme_classic(base_size = 10) +
+      ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                     axis.text.x = ggplot2::element_text(angle = 30, hjust = 1))
+    save_pdf_png(pB, file.path(p$base, "fig5_s1_antigen_lineage_composition_by_species"),
+                 w = max(7, length(keep_sp) * 1.5 + 1.5), h = 4.6)
+    sp_pct$fisher_p <- ft$p.value %||% NA_real_
+    out_csv <- dplyr::bind_rows(
+      dplyr::mutate(pct, antigen_species = "ALL"),
+      dplyr::select(sp_pct, "antigen_species", "group", "lineage", "n", "frac"))
+  }
+  out_csv$fisher_p <- if (is.null(ft)) NA_real_ else ft$p.value
+  utils::write.csv(out_csv,
+                   file.path(p$tables_rep, "fig5_s1_antigen_lineage_composition.csv"),
+                   row.names = FALSE)
+  log_message("  viz_fig5_s1: wrote lineage composition panel + CSV.")
+  invisible(TRUE)
+}
+
+# ---------------------------------------------------------------------------
+# S2 — Clonal expansion (Gini) + expanded-clone cell state by etiology.
+# ---------------------------------------------------------------------------
+viz_fig5_s2_expansion_state_by_etiology <- function(cfg) {
+  p <- .tcra_paths(cfg)
+  gini_csv <- file.path(p$tables_t, "tcell_paired_eye_blood_metrics.csv")
+  ct_csv   <- file.path(p$tables_rep, "TCR_top_expanded_eye_celltype.csv")
+  groups_keep <- cfg$tcr_advanced$fig5_supp$groups_keep %||% c("NIU", "Viral")
+  min_cells <- cfg$tcr_advanced$fig5_supp$expanded_clone_min_cells %||% 3L
+  pal <- if (exists("ETIOLOGY_GROUP_COLORS", inherits = TRUE))
+           ETIOLOGY_GROUP_COLORS else c(NIU = "#E21F26", Viral = "#397FB9")
+
+  # (a) Gini eye/blood x viral/NIU.
+  if (file.exists(gini_csv)) {
+    g <- utils::read.csv(gini_csv, stringsAsFactors = FALSE)
+    g <- g[g$Phenotype_2 %in% groups_keep & !is.na(g$gini), , drop = FALSE]
+    if (nrow(g) > 0) {
+      g$Tissue_1 <- factor(g$Tissue_1, levels = c("Eye", "Blood"))
+      pv <- vapply(levels(g$Tissue_1), function(ti) {
+        sub <- g[g$Tissue_1 == ti, , drop = FALSE]
+        if (length(unique(sub$Phenotype_2)) < 2) return(NA_real_)
+        tryCatch(stats::wilcox.test(gini ~ Phenotype_2, data = sub)$p.value,
+                 error = function(e) NA_real_)
+      }, numeric(1))
+      sub_lab <- paste(sprintf("%s: Wilcoxon p=%.3g", names(pv), pv), collapse = "   ")
+      pa <- ggplot2::ggplot(g, ggplot2::aes(.data$Phenotype_2, .data$gini,
+                                            fill = .data$Phenotype_2)) +
+        ggplot2::geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+        ggplot2::geom_jitter(width = 0.12, alpha = 0.7, size = 1.6) +
+        ggplot2::facet_wrap(~ .data$Tissue_1) +
+        ggplot2::scale_fill_manual(values = pal) +
+        ggplot2::labs(title = "Clonal expansion (Gini) by tissue and disease group",
+                      subtitle = sub_lab, x = NULL,
+                      y = "Gini coefficient (higher = more expanded)") +
+        ggplot2::theme_classic(base_size = 11) +
+        ggplot2::theme(legend.position = "none",
+                       plot.title = ggplot2::element_text(face = "bold"),
+                       plot.subtitle = ggplot2::element_text(size = 8))
+      save_pdf_png(pa, file.path(p$base, "fig5_s2_gini_viral_vs_niu"), w = 6.5, h = 5)
+    }
+  } else {
+    log_message("  viz_fig5_s2: gini metrics CSV missing; skipping panel (a).")
+  }
+
+  # (b) Cell-state composition of expanded eye clones, viral vs NIU.
+  if (!file.exists(ct_csv)) {
+    log_message("  viz_fig5_s2: celltype CSV missing; skipping panel (b).")
+    return(invisible(TRUE))
+  }
+  ct <- utils::read.csv(ct_csv, stringsAsFactors = FALSE)
+  ct <- ct[ct$tissue == "Eye" & !is.na(ct$n_cells) & ct$n_cells >= min_cells, ,
+           drop = FALSE]
+  if (nrow(ct) == 0) {
+    log_message("  viz_fig5_s2: no expanded eye clones at cutoff; skipping panel (b).")
+    return(invisible(TRUE))
+  }
+  map_sub <- function(s) {
+    is_t <- grepl("^tcell_", s)
+    out <- rep("Out of T-cell compartment", length(s))
+    ids <- sub("^tcell_", "", s[is_t])
+    out[is_t] <- vapply(ids, function(id) get_substate_display(cfg, "tcell", id),
+                        character(1))
+    out
+  }
+  ct$substate_display <- map_sub(ct$substate)
+  pheno <- .fig5_supp_subject_pheno(cfg)
+  if (!is.null(pheno)) {
+    ct <- dplyr::left_join(ct, pheno, by = c("subject" = "Subject"))
+  } else {
+    ct$Phenotype_2 <- NA_character_
+  }
+  ct <- ct[ct$Phenotype_2 %in% groups_keep, , drop = FALSE]
+  if (nrow(ct) == 0) {
+    log_message("  viz_fig5_s2: no expanded clones map to NIU/Viral; skipping panel (b).")
+    return(invisible(TRUE))
+  }
+  comp <- ct |>
+    dplyr::count(.data$Phenotype_2, .data$substate_display, wt = .data$n_cells,
+                 name = "n_cells") |>
+    dplyr::group_by(.data$Phenotype_2) |>
+    dplyr::mutate(frac = .data$n_cells / sum(.data$n_cells)) |>
+    dplyr::ungroup()
+  nclone <- ct |>
+    dplyr::distinct(.data$Phenotype_2, .data$substate_display, .data$clone_id) |>
+    dplyr::count(.data$Phenotype_2, .data$substate_display, name = "n_clones")
+  comp <- dplyr::left_join(comp, nclone,
+                           by = c("Phenotype_2", "substate_display"))
+  utils::write.csv(comp,
+                   file.path(p$tables_rep,
+                             "fig5_s2_expanded_clone_cluster_composition.csv"),
+                   row.names = FALSE)
+
+  sub_levels <- sort(unique(comp$substate_display))
+  paired_base <- RColorBrewer::brewer.pal(12, "Paired")
+  pal_subs <- if (length(sub_levels) <= 12) paired_base[seq_along(sub_levels)]
+              else grDevices::colorRampPalette(paired_base)(length(sub_levels))
+  names(pal_subs) <- sub_levels
+  ntot <- ct |> dplyr::group_by(.data$Phenotype_2) |>
+    dplyr::summarise(n = sum(.data$n_cells), .groups = "drop")
+  pb <- ggplot2::ggplot(comp, ggplot2::aes(.data$Phenotype_2, .data$frac,
+                                           fill = .data$substate_display)) +
+    ggplot2::geom_col(width = 0.7, color = "white", linewidth = 0.2) +
+    ggplot2::geom_text(data = ntot,
+                       ggplot2::aes(x = .data$Phenotype_2, y = 1.02,
+                                    label = paste0("n=", .data$n)),
+                       inherit.aes = FALSE, vjust = 0, size = 3.2) +
+    ggplot2::scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                                expand = ggplot2::expansion(add = c(0, 0.08))) +
+    ggplot2::scale_fill_manual(values = pal_subs, name = "T cell substate") +
+    ggplot2::labs(
+      title = "Cell state of expanded eye clones, viral vs autoimmune",
+      subtitle = sprintf("Clones with >= %d cells in eye; cells weighted by clone size",
+                         min_cells),
+      x = NULL, y = "Fraction of expanded-clone cells") +
+    ggplot2::theme_classic(base_size = 11) +
+    ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                   plot.subtitle = ggplot2::element_text(size = 8))
+  save_pdf_png(pb, file.path(p$base, "fig5_s2_expanded_clone_clusters"),
+               w = 6.5, h = 5.5)
+  log_message("  viz_fig5_s2: wrote expansion + cell-state panels + CSV.")
+  invisible(TRUE)
+}
+
+# ---------------------------------------------------------------------------
+# S3 — Eye<->blood sharing of expanded clones. Extends the existing
+# .tcell_eye_blood_overlap() (R/88) which only plots frac_eye_shared. Adds
+# (a) Morisita index viral vs NIU and (b) fraction of EXPANDED eye clones
+# detected in blood, viral vs NIU.
+# ---------------------------------------------------------------------------
+viz_fig5_s3_eye_blood_sharing <- function(cfg) {
+  p <- .tcra_paths(cfg)
+  ov_csv  <- file.path(p$tables_rep, "TCR_eye_blood_overlap.csv")
+  exp_csv <- file.path(p$tables_rep, "TCR_top_expanded_eye.csv")
+  groups_keep <- cfg$tcr_advanced$fig5_supp$groups_keep %||% c("NIU", "Viral")
+  min_cells <- cfg$tcr_advanced$fig5_supp$expanded_clone_min_cells %||% 3L
+  pal <- if (exists("ETIOLOGY_GROUP_COLORS", inherits = TRUE))
+           ETIOLOGY_GROUP_COLORS else c(NIU = "#E21F26", Viral = "#397FB9")
+  if (!file.exists(ov_csv)) {
+    log_message("  viz_fig5_s3: overlap CSV missing; skipping.")
+    return(invisible(NULL))
+  }
+  ov <- utils::read.csv(ov_csv, stringsAsFactors = FALSE)
+
+  # (a) Morisita viral vs NIU.
+  ova <- ov[ov$phenotype %in% groups_keep & !is.na(ov$morisita), , drop = FALSE]
+  if (nrow(ova) > 0) {
+    wp <- tryCatch(stats::wilcox.test(morisita ~ phenotype, data = ova)$p.value,
+                   error = function(e) NA_real_)
+    pa <- ggplot2::ggplot(ova, ggplot2::aes(.data$phenotype, .data$morisita,
+                                            fill = .data$phenotype)) +
+      ggplot2::geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+      ggplot2::geom_jitter(width = 0.12, alpha = 0.75, size = 1.8) +
+      ggplot2::scale_fill_manual(values = pal) +
+      ggplot2::labs(title = "Eye<->blood repertoire overlap (Morisita-Horn)",
+                    subtitle = sprintf("Wilcoxon p = %.3g", wp),
+                    x = NULL, y = "Morisita-Horn index (eye vs blood)") +
+      ggplot2::theme_classic(base_size = 11) +
+      ggplot2::theme(legend.position = "none",
+                     plot.title = ggplot2::element_text(face = "bold"))
+    save_pdf_png(pa, file.path(p$base, "fig5_s3_morisita_viral_vs_niu"),
+                 w = 5, h = 5.5)
+  }
+
+  # (b) Fraction of expanded eye clones found in blood, per subject.
+  if (file.exists(exp_csv)) {
+    ex <- utils::read.csv(exp_csv, stringsAsFactors = FALSE)
+    ex <- ex[!is.na(ex$n_cells_eye) & ex$n_cells_eye >= min_cells, , drop = FALSE]
+    if (nrow(ex) > 0) {
+      ex$fib <- as.logical(as.character(ex$found_in_blood))
+      sub_frac <- ex |>
+        dplyr::group_by(.data$subject) |>
+        dplyr::summarise(n_expanded_eye_clones = dplyr::n(),
+                         frac_found_in_blood = mean(.data$fib, na.rm = TRUE),
+                         .groups = "drop")
+      ph <- dplyr::distinct(ov[, c("subject", "phenotype")])
+      sub_frac <- dplyr::left_join(sub_frac, ph, by = "subject")
+      mor <- dplyr::distinct(ov[, c("subject", "morisita")])
+      sub_frac <- dplyr::left_join(sub_frac, mor, by = "subject")
+      utils::write.csv(sub_frac,
+                       file.path(p$tables_rep,
+                                 "fig5_s3_expanded_clone_blood_detection.csv"),
+                       row.names = FALSE)
+      sf <- sub_frac[sub_frac$phenotype %in% groups_keep &
+                       !is.na(sub_frac$frac_found_in_blood), , drop = FALSE]
+      if (nrow(sf) > 0) {
+        wp2 <- tryCatch(
+          stats::wilcox.test(frac_found_in_blood ~ phenotype, data = sf)$p.value,
+          error = function(e) NA_real_)
+        pb <- ggplot2::ggplot(sf, ggplot2::aes(.data$phenotype,
+                                               .data$frac_found_in_blood,
+                                               fill = .data$phenotype)) +
+          ggplot2::geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+          ggplot2::geom_jitter(width = 0.12, alpha = 0.75, size = 1.8) +
+          ggplot2::scale_fill_manual(values = pal) +
+          ggplot2::scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+          ggplot2::labs(
+            title = "Expanded eye clones detected in blood",
+            subtitle = sprintf("Clones >= %d eye cells; Wilcoxon p = %.3g",
+                               min_cells, wp2),
+            x = NULL, y = "Fraction of expanded eye clones found in blood") +
+          ggplot2::theme_classic(base_size = 11) +
+          ggplot2::theme(legend.position = "none",
+                         plot.title = ggplot2::element_text(face = "bold"))
+        save_pdf_png(pb, file.path(p$base, "fig5_s3_expanded_clone_blood_detection"),
+                     w = 5, h = 5.5)
+      }
+    }
+  }
+  log_message("  viz_fig5_s3: wrote eye-blood sharing panels + CSV.")
+  invisible(TRUE)
+}
+
+# ---------------------------------------------------------------------------
+# S4 — Clonal expansion vs disease/symptom duration (chronicity hypothesis).
+# Joins sample metadata durations to per-subject eye Gini and tests whether
+# clonality tracks duration. Note: acute ARN cases are highly expanded, so
+# duration is not the whole story — surfaced for the collaborator reply.
+# ---------------------------------------------------------------------------
+viz_fig5_s4_duration_clonality <- function(cfg) {
+  p <- .tcra_paths(cfg)
+  gini_csv <- file.path(p$tables_rep, "clonality_gini_per_subject.csv")
+  if (!file.exists(gini_csv))
+    gini_csv <- file.path(p$tables_t, "tcell_paired_eye_blood_metrics.csv")
+  md_path <- "inputs/data/metadata.csv"
+  groups_keep <- cfg$tcr_advanced$fig5_supp$groups_keep %||% c("NIU", "Viral")
+  meth <- cfg$tcr_advanced$fig5_supp$corr_method %||% "spearman"
+  pal <- if (exists("ETIOLOGY_GROUP_COLORS", inherits = TRUE))
+           ETIOLOGY_GROUP_COLORS else c(NIU = "#E21F26", Viral = "#397FB9")
+  if (!file.exists(gini_csv) || !file.exists(md_path)) {
+    log_message("  viz_fig5_s4: gini or metadata CSV missing; skipping.")
+    return(invisible(NULL))
+  }
+  g <- utils::read.csv(gini_csv, stringsAsFactors = FALSE)
+  # If using the paired metrics table, restrict to eye and one row/subject.
+  if ("Tissue_1" %in% colnames(g)) g <- g[g$Tissue_1 == "Eye", , drop = FALSE]
+  g <- g[!is.na(g$gini), c("Subject", "gini",
+                           intersect("n_clones", colnames(g))), drop = FALSE]
+
+  md <- utils::read.csv(md_path, stringsAsFactors = FALSE, check.names = TRUE)
+  md$Symptom_Duration_Days  <- suppressWarnings(as.numeric(md$Symptom_Duration_Days))
+  md$Disease_Duration_Years <- suppressWarnings(as.numeric(md$Disease_Duration_Years))
+  # Collapse to one row per subject (samples repeat across Eye/Blood and
+  # timepoints): take the earliest/baseline duration per subject.
+  dur <- md |>
+    dplyr::group_by(.data$Subject) |>
+    dplyr::summarise(
+      Phenotype_2 = .data$Phenotype_2[1],
+      Symptom_Duration_Days  = if (all(is.na(.data$Symptom_Duration_Days)))
+                                 NA_real_ else min(.data$Symptom_Duration_Days, na.rm = TRUE),
+      Disease_Duration_Years = if (all(is.na(.data$Disease_Duration_Years)))
+                                 NA_real_ else min(.data$Disease_Duration_Years, na.rm = TRUE),
+      .groups = "drop")
+  df <- dplyr::left_join(g, dur, by = "Subject")
+  df <- df[df$Phenotype_2 %in% groups_keep, , drop = FALSE]
+  if (nrow(df) == 0) {
+    log_message("  viz_fig5_s4: no subjects after duration join; skipping.")
+    return(invisible(NULL))
+  }
+  utils::write.csv(df,
+                   file.path(p$tables_rep, "fig5_s4_duration_clonality.csv"),
+                   row.names = FALSE)
+  # Honesty note: in this cohort disease-duration metadata is recorded for NIU
+  # subjects only, so this panel tests the within-NIU duration<->clonality
+  # relationship; the viral arm cannot be placed on the duration axis.
+  avail <- df[!is.na(df$Symptom_Duration_Days), , drop = FALSE]
+  avail_note <- sprintf(
+    "Duration recorded for %d NIU and %d viral subjects (infectious samples lack duration metadata)",
+    sum(avail$Phenotype_2 == "NIU"), sum(avail$Phenotype_2 == "Viral"))
+
+  corr_lab <- function(d, xcol) {
+    dd <- d[!is.na(d[[xcol]]) & !is.na(d$gini), , drop = FALSE]
+    if (nrow(dd) < 3) return("insufficient n")
+    ct <- tryCatch(stats::cor.test(dd[[xcol]], dd$gini, method = meth),
+                   error = function(e) NULL)
+    if (is.null(ct)) "NA" else
+      sprintf("overall rho=%.2f, p=%.3g (n=%d)", unname(ct$estimate),
+              ct$p.value, nrow(dd))
+  }
+  mk_scatter <- function(xcol, xlab, fname) {
+    dd <- df[!is.na(df[[xcol]]), , drop = FALSE]
+    if (nrow(dd) < 3) return(invisible())
+    sp <- ggplot2::ggplot(dd, ggplot2::aes(.data[[xcol]], .data$gini,
+                                           color = .data$Phenotype_2)) +
+      ggplot2::geom_smooth(method = "lm", se = FALSE, linewidth = 0.6,
+                           ggplot2::aes(group = 1), color = "grey50") +
+      ggplot2::geom_point(size = 2.4, alpha = 0.85) +
+      ggplot2::scale_color_manual(values = pal, name = NULL) +
+      ggplot2::labs(title = "Clonal expansion vs disease duration",
+                    subtitle = corr_lab(dd, xcol), x = xlab,
+                    y = "Eye Gini coefficient", caption = avail_note) +
+      ggplot2::theme_classic(base_size = 11) +
+      ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                     plot.subtitle = ggplot2::element_text(size = 9))
+    save_pdf_png(sp, file.path(p$base, fname), w = 6, h = 5)
+  }
+  mk_scatter("Symptom_Duration_Days", "Symptom duration (days)",
+             "fig5_s4_gini_vs_symptom_duration")
+  mk_scatter("Disease_Duration_Years", "Disease duration (years)",
+             "fig5_s4_gini_vs_disease_duration")
+
+  dl <- df[!is.na(df$Symptom_Duration_Days), , drop = FALSE]
+  if (nrow(dl) > 0) {
+    wp <- tryCatch(
+      stats::wilcox.test(Symptom_Duration_Days ~ Phenotype_2, data = dl)$p.value,
+      error = function(e) NA_real_)
+    pd <- ggplot2::ggplot(dl, ggplot2::aes(.data$Phenotype_2,
+                                           .data$Symptom_Duration_Days,
+                                           fill = .data$Phenotype_2)) +
+      ggplot2::geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+      ggplot2::geom_jitter(width = 0.12, alpha = 0.75, size = 1.8) +
+      ggplot2::scale_fill_manual(values = pal) +
+      ggplot2::labs(title = "Symptom duration by disease group",
+                    subtitle = sprintf("Wilcoxon p = %.3g", wp),
+                    x = NULL, y = "Symptom duration (days)") +
+      ggplot2::theme_classic(base_size = 11) +
+      ggplot2::theme(legend.position = "none",
+                     plot.title = ggplot2::element_text(face = "bold"))
+    save_pdf_png(pd, file.path(p$base, "fig5_s4_duration_distribution"),
+                 w = 5, h = 5.5)
+  }
+  log_message("  viz_fig5_s4: wrote duration-clonality panels + CSV.")
+  invisible(TRUE)
+}
+
+# ---------------------------------------------------------------------------
+# S5 — GLIPH motif methodology bridge. For the top NIU-enriched convergence
+# clusters, show member CDR3 alignment + PWM logo + enrichment annotation so
+# readers see how raw sequences become a motif and an FDR. Reuses the
+# length-matching recipe from viz_gliph_motif_directional().
+# ---------------------------------------------------------------------------
+viz_fig5_s5_motif_bridge <- function(cfg) {
+  p <- .tcra_paths(cfg)
+  cls_csv <- file.path(p$tables_rep, "gliph_clusters.csv")
+  enr_csv <- file.path(p$tables_rep, "gliph_enrichment_viral_vs_niu.csv")
+  top_n <- cfg$tcr_advanced$fig5_supp$logo_top_n_niu %||% 8L
+  min_members <- cfg$tcr_advanced$fig5_supp$logo_min_members %||% 3L
+  if (!file.exists(cls_csv) || !file.exists(enr_csv)) {
+    log_message("  viz_fig5_s5: GLIPH tables missing; skipping.")
+    return(invisible(NULL))
+  }
+  if (!requireNamespace("ggseqlogo", quietly = TRUE) ||
+      !requireNamespace("patchwork", quietly = TRUE)) {
+    log_message("  viz_fig5_s5: ggseqlogo/patchwork not installed; skipping.")
+    return(invisible(NULL))
+  }
+  cls <- utils::read.csv(cls_csv, stringsAsFactors = FALSE)
+  enr <- utils::read.csv(enr_csv, stringsAsFactors = FALSE)
+  niu <- enr[grepl("^NIU", enr$direction, ignore.case = TRUE) & !is.na(enr$FDR), ,
+             drop = FALSE]
+  niu <- utils::head(niu[order(niu$FDR), , drop = FALSE], top_n)
+  if (nrow(niu) == 0) {
+    log_message("  viz_fig5_s5: no NIU-enriched clusters; skipping.")
+    return(invisible(NULL))
+  }
+
+  aa_pal <- structure(
+    grDevices::colorRampPalette(RColorBrewer::brewer.pal(12, "Paired"))(20),
+    names = c("A","R","N","D","C","Q","E","G","H","I",
+              "L","K","M","F","P","S","T","W","Y","V"))
+  panels <- list(); members_out <- list()
+  for (i in seq_len(nrow(niu))) {
+    cid <- niu$cluster_id[i]
+    rows <- cls[cls$cluster_id == cid, , drop = FALSE]
+    s <- rows$CDR3b; keep <- !is.na(s) & nchar(s) > 0
+    s <- s[keep]; rows <- rows[keep, , drop = FALSE]
+    if (length(s) < min_members) next
+    L <- as.integer(names(sort(table(nchar(s)), decreasing = TRUE))[1])
+    sel <- nchar(s) == L
+    s <- s[sel]; rows <- rows[sel, , drop = FALSE]
+    if (length(s) < min_members) next
+    trbv_mode <- names(sort(table(rows$TRBV[rows$TRBV != "" & !is.na(rows$TRBV)]),
+                            decreasing = TRUE))[1] %||% "NA"
+
+    aa <- do.call(rbind, strsplit(s, ""))
+    aln <- data.frame(
+      seq_id = factor(rep(seq_len(nrow(aa)), times = ncol(aa))),
+      pos = rep(seq_len(ncol(aa)), each = nrow(aa)),
+      aa = as.vector(aa), stringsAsFactors = FALSE)
+    tile <- ggplot2::ggplot(aln, ggplot2::aes(.data$pos, .data$seq_id,
+                                              fill = .data$aa, label = .data$aa)) +
+      ggplot2::geom_tile(color = "white", linewidth = 0.3) +
+      ggplot2::geom_text(size = 2.2) +
+      ggplot2::scale_fill_manual(values = aa_pal, guide = "none") +
+      ggplot2::scale_x_continuous(breaks = seq_len(L), expand = c(0, 0)) +
+      ggplot2::labs(x = "CDR3-beta position", y = NULL) +
+      ggplot2::theme_minimal(base_size = 8) +
+      ggplot2::theme(axis.text.y = ggplot2::element_blank(),
+                     panel.grid = ggplot2::element_blank())
+    logo <- ggseqlogo::ggseqlogo(s) +
+      ggplot2::labs(title = sprintf("%s  |  motif %s", cid, niu$motif[i]),
+                    subtitle = sprintf("n=%d CDR3 (len %d)  OR(Viral/NIU)=%.2g  FDR=%.2g  %s",
+                                       length(s), L,
+                                       niu$median_OR[i] %||% NA_real_,
+                                       niu$FDR[i], trbv_mode)) +
+      ggplot2::theme_bw(base_size = 8) +
+      ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 8),
+                     plot.subtitle = ggplot2::element_text(size = 6.5))
+    panels[[length(panels) + 1]] <- logo / tile + patchwork::plot_layout(heights = c(1, 1.4))
+    members_out[[length(members_out) + 1]] <- data.frame(
+      cluster_id = cid, motif = niu$motif[i], CDR3b = s, TRBV = rows$TRBV,
+      patient = rows$patient, FDR = niu$FDR[i],
+      median_OR = niu$median_OR[i] %||% NA_real_, stringsAsFactors = FALSE)
+  }
+  if (length(panels) == 0) {
+    log_message("  viz_fig5_s5: no clusters met the member floor; skipping.")
+    return(invisible(NULL))
+  }
+  ncol_p <- min(3L, length(panels))
+  combined <- patchwork::wrap_plots(panels, ncol = ncol_p) +
+    patchwork::plot_annotation(
+      title = "GLIPH motif bridge: CDR3 sequence -> convergence motif -> NIU enrichment",
+      subtitle = "Top NIU-enriched convergence clusters; length-matched members. Logo = PWM, tiles = aligned CDR3-beta.",
+      theme = ggplot2::theme(
+        plot.title = ggplot2::element_text(face = "bold"),
+        plot.subtitle = ggplot2::element_text(size = 9)))
+  nrow_p <- ceiling(length(panels) / ncol_p)
+  save_pdf_png(combined, file.path(p$base, "fig5_s5_motif_bridge"),
+               w = 5 * ncol_p, h = 3.6 * nrow_p + 0.8)
+  utils::write.csv(do.call(rbind, members_out),
+                   file.path(p$tables_rep, "fig5_s5_motif_bridge_members.csv"),
+                   row.names = FALSE)
+  log_message(sprintf("  viz_fig5_s5: wrote motif bridge for %d clusters + CSV.",
+                      length(panels)))
+  invisible(TRUE)
+}
+
+# ---------------------------------------------------------------------------
+# S3b — Blood<->Eye sharing of expanded clones as an alluvial. Strata are the
+# two tissues (Blood, Eye) on the x-axis; each ribbon is one expanded eye TCR
+# clone; ribbon colour marks whether the clone is also detected in paired blood
+# (shared) or eye-restricted. Faceted NIU vs Viral. Companion to the S3
+# boxplots, requested for the supplement.
+# ---------------------------------------------------------------------------
+viz_fig5_s6_expansion_by_niu_diagnosis <- function(cfg) {
+  p <- .tcra_paths(cfg)
+  gini_csv <- file.path(p$tables_t, "tcell_paired_eye_blood_metrics.csv")
+  ovl_csv  <- file.path(p$tables_rep, "TCR_eye_blood_overlap.csv")
+  niu_set  <- as.character(cfg$etiology_groups$niu %||%
+                             c("Idiopathic", "HLA_B27", "VKH", "BSCR", "JIA", "SLE"))
+  pal <- if (exists("ETIOLOGY_NIU_DISTINCT_COLORS", inherits = TRUE))
+           ETIOLOGY_NIU_DISTINCT_COLORS else NULL
+
+  # n-labelled axis, ordered by sample size so the thin groups are visibly thin.
+  #
+  # `id` is the independence unit and must be supplied whenever the input has
+  # more than one row per subject. The Gini table has one row per
+  # (Subject, Tissue_1), so counting rows there would report 22 Idiopathic
+  # subjects instead of 11 and overstate every group by exactly the number of
+  # tissues.
+  lab_with_n <- function(v, id = NULL) {
+    n_by <- if (is.null(id)) table(v)
+            else vapply(split(id, v), function(x) length(unique(x)), integer(1))
+    n_by <- sort(n_by, decreasing = TRUE)
+    factor(paste0(v, "\n(n=", n_by[as.character(v)], ")"),
+           levels = paste0(names(n_by), "\n(n=", n_by, ")"))
+  }
+  # Name the groups the test actually used. "Kruskal-Wallis across diagnoses
+  # with n >= 3" reads like a six-group omnibus, when on this cohort only
+  # Idiopathic and HLA_B27 clear the floor and it is really a two-group
+  # comparison. Spelling out the members stops the caption overstating itself.
+  kw_exploratory <- function(value, grp, min_n = 3L) {
+    ok <- names(which(table(grp) >= min_n))
+    if (length(ok) < 2L)
+      return("only one diagnosis reaches n >= 3, so no across-diagnosis test is shown")
+    keep <- grp %in% ok
+    k <- tryCatch(stats::kruskal.test(value[keep] ~ factor(grp[keep]))$p.value,
+                  error = function(e) NA_real_)
+    sprintf("exploratory %s p = %.3g (%s only; other diagnoses n <= 2 and are shown but not tested)",
+            if (length(ok) == 2L) "Wilcoxon" else "Kruskal-Wallis",
+            k, paste(ok, collapse = " vs "))
+  }
+
+  # (a) Eye/blood sharing per NIU diagnosis. TCR_eye_blood_overlap.csv already
+  #     carries `etiology`, so this needs no upstream re-run.
+  if (file.exists(ovl_csv)) {
+    o <- utils::read.csv(ovl_csv, stringsAsFactors = FALSE)
+    o <- o[o$phenotype %in% "NIU" & o$etiology %in% niu_set, , drop = FALSE]
+    if (nrow(o) >= 4L) {
+      o$dx <- lab_with_n(o$etiology, o$subject)   # one row per subject already
+      long <- rbind(
+        data.frame(dx = o$dx, etiology = o$etiology,
+                   metric = "Eye clones also seen in blood",
+                   value = o$frac_eye_shared_with_blood, stringsAsFactors = FALSE),
+        data.frame(dx = o$dx, etiology = o$etiology,
+                   metric = "Morisita eye-blood overlap",
+                   value = o$morisita, stringsAsFactors = FALSE))
+      pa <- ggplot2::ggplot(long, ggplot2::aes(.data$dx, .data$value)) +
+        ggplot2::geom_boxplot(outlier.shape = NA, fill = NA, colour = "grey55",
+                              linewidth = 0.4) +
+        ggplot2::geom_jitter(ggplot2::aes(fill = .data$etiology), shape = 21,
+                             width = 0.12, height = 0, size = 3.4,
+                             stroke = 0.6, colour = "#E21F26", alpha = 0.95) +
+        ggplot2::facet_wrap(~ .data$metric, scales = "free_y") +
+        ggplot2::labs(
+          title = "Eye-blood clonal sharing by NIU sub-diagnosis",
+          subtitle = paste0("One point per subject, red outline = NIU. ",
+                            kw_exploratory(o$frac_eye_shared_with_blood, o$etiology),
+                            ". Four of six diagnoses have n <= 2; read as ",
+                            "descriptive."),
+          x = NULL, y = NULL) +
+        ggplot2::theme_bw(base_size = 10) +
+        ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                       plot.subtitle = ggplot2::element_text(size = 8),
+                       axis.text.x = ggplot2::element_text(size = 7),
+                       legend.position = "none")
+      if (!is.null(pal))
+        pa <- pa + ggplot2::scale_fill_manual(values = pal, na.value = "grey70")
+      save_pdf_png(pa, file.path(p$base, "fig5_s6_eye_blood_sharing_by_niu_dx"),
+                   w = 9, h = 5)
+    }
+  } else {
+    log_message("  fig5 s6: ", basename(ovl_csv), " not found.")
+  }
+
+  # (b) Expansion (Gini) per NIU diagnosis, split by tissue. Requires the
+  #     Etiology column added to R/55 on 2026-08-01; older CSVs lack it.
+  if (!file.exists(gini_csv)) {
+    log_message("  fig5 s6: ", basename(gini_csv), " not found.")
+    return(invisible(NULL))
+  }
+  g <- utils::read.csv(gini_csv, stringsAsFactors = FALSE)
+  if (!"Etiology" %in% colnames(g)) {
+    log_message("  fig5 s6: ", basename(gini_csv), " predates the Etiology ",
+                "column. Re-run steps_fig6$tcell_paired_metrics (R/55) to ",
+                "enable the per-diagnosis Gini panel.")
+    return(invisible(NULL))
+  }
+  g <- g[g$Phenotype_2 %in% "NIU" & g$Etiology %in% niu_set & !is.na(g$gini), ,
+         drop = FALSE]
+  if (nrow(g) < 4L) return(invisible(NULL))
+  g$Tissue_1 <- factor(g$Tissue_1, levels = c("Eye", "Blood"))
+  # Two rows per subject here (Eye and Blood), so count subjects, not rows.
+  g$dx <- lab_with_n(g$Etiology, g$Subject)
+  pb <- ggplot2::ggplot(g, ggplot2::aes(.data$dx, .data$gini)) +
+    ggplot2::geom_boxplot(outlier.shape = NA, fill = NA, colour = "grey55",
+                          linewidth = 0.4) +
+    ggplot2::geom_jitter(ggplot2::aes(fill = .data$Etiology), shape = 21,
+                         width = 0.10, height = 0, size = 3.4, stroke = 0.6,
+                         colour = "#E21F26", alpha = 0.95) +
+    ggplot2::facet_wrap(~ .data$Tissue_1) +
+    ggplot2::labs(
+      title = "Clonal expansion (Gini) by NIU sub-diagnosis and tissue",
+      subtitle = paste0("One point per subject, red outline = NIU. ",
+                        kw_exploratory(g$gini[g$Tissue_1 == "Eye"],
+                                       g$Etiology[g$Tissue_1 == "Eye"]),
+                        " (eye). Higher Gini = more expanded."),
+      x = NULL, y = "Gini coefficient") +
+    ggplot2::theme_bw(base_size = 10) +
+    ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                   plot.subtitle = ggplot2::element_text(size = 8),
+                   axis.text.x = ggplot2::element_text(size = 7),
+                   legend.position = "none")
+  if (!is.null(pal))
+    pb <- pb + ggplot2::scale_fill_manual(values = pal, na.value = "grey70")
+  save_pdf_png(pb, file.path(p$base, "fig5_s6_gini_by_niu_dx"), w = 9, h = 5)
+  invisible(NULL)
 }
 
 viz_fig5_s3b_eye_blood_clone_alluvial <- function(cfg) {
@@ -2821,9 +3530,6 @@ viz_fig5_s3b_eye_blood_clone_alluvial <- function(cfg) {
   invisible(TRUE)
 }
 
-# ---------------------------------------------------------------------------
-# Top-level dispatcher
-# ---------------------------------------------------------------------------
 run_visualizations_tcr_advanced <- function(cfg) {
   if (!isTRUE(cfg$steps$viz_tcr_advanced)) {
     log_message("viz_tcr_advanced disabled. Skipping.")
@@ -2849,8 +3555,14 @@ run_visualizations_tcr_advanced <- function(cfg) {
   try(viz_fig5_h_top_niu_motif_overlap(cfg),   silent = FALSE)
   try(viz_fig5_i_clone_group_lr_with_b27(cfg), silent = FALSE)
   try(viz_fig5h_topn_sensitivity(cfg),         silent = FALSE)
-  # Supplemental blood<->eye expanded-clone sharing alluvial.
-  try(viz_fig5_s3b_eye_blood_clone_alluvial(cfg), silent = FALSE)
+  # Figure 5 supplemental panels (collaborator-driven; see config fig5_supp).
+  try(viz_fig5_s1_antigen_lineage_composition(cfg), silent = FALSE)
+  try(viz_fig5_s2_expansion_state_by_etiology(cfg), silent = FALSE)
+  try(viz_fig5_s3_eye_blood_sharing(cfg),           silent = FALSE)
+  try(viz_fig5_s3b_eye_blood_clone_alluvial(cfg),   silent = FALSE)
+  try(viz_fig5_s4_duration_clonality(cfg),          silent = FALSE)
+  try(viz_fig5_s5_motif_bridge(cfg),                silent = FALSE)
+  try(viz_fig5_s6_expansion_by_niu_diagnosis(cfg),  silent = FALSE)
   log_message("viz_tcr_advanced complete.")
   invisible(TRUE)
 }

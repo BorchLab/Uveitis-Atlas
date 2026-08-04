@@ -80,6 +80,66 @@ ETIOLOGY_SUBTYPE_COLORS <- c(
   Healthy     = "#A8DADC"
 )
 
+# Distinct-hue palette for NIU sub-diagnoses, used by the per-substate PCA
+# scatters (F3E, F4D, Fig 6 B cell).
+#
+# ETIOLOGY_SUBTYPE_COLORS above deliberately keeps every NIU subtype inside one
+# red family so the NIU-vs-Viral split stays readable at a glance.
+ETIOLOGY_NIU_DISTINCT_COLORS <- c(
+  BSCR        = "#3C6DB0",  # blue
+  HLA_B27     = "#EFA45C",  # orange
+  Idiopathic  = "#5AA85A",  # green
+  JIA         = "#E8453B",  # red
+  SLE         = "#9D91C9",  # light purple
+  VKH         = "#8A6844",  # brown
+  Phakic_lens = "#CE7FA8",  # pink
+  # Viral is not broken out by subtype in these panels: the reviewer's question
+  # is about NIU heterogeneity, and 9 of 13 viral subjects are VZV_ARN.
+  Viral       = unname(ETIOLOGY_GROUP_COLORS["Viral"]),
+  Healthy     = unname(ETIOLOGY_GROUP_COLORS["Healthy"])
+)
+
+# Build the fill label used by those scatters: NIU keeps its sub-diagnosis,
+# everything else collapses to its phenotype group.
+etiology_fill_label <- function(phenotype_2, etiology) {
+  lab <- ifelse(phenotype_2 %in% "NIU", as.character(etiology),
+                as.character(phenotype_2))
+  lab[is.na(lab) | lab == ""] <- "Unknown"
+  lab
+}
+
+# Shared layers for a PC1/PC2 subject scatter coloured by NIU sub-diagnosis.
+#
+# Points are shape 21 so fill and outline are independent: fill carries the
+# sub-diagnosis, outline carries NIU versus Viral. The ellipse uses the same
+# colour scale as the outline, so a red ring and a red ellipse both continue to
+# mean NIU exactly as they did before this change.
+etiology_point_layers <- function(ellipse_level = 0.95, point_size = 2.6,
+                                  stroke = 0.85, legend_ncol = 2) {
+  present <- names(ETIOLOGY_NIU_DISTINCT_COLORS)
+  list(
+    ggplot2::geom_point(
+      ggplot2::aes(fill = .data$etiology_fill, colour = .data$Phenotype_2),
+      shape = 21, size = point_size, stroke = stroke, alpha = 0.95),
+    ggplot2::stat_ellipse(
+      ggplot2::aes(colour = .data$Phenotype_2, group = .data$Phenotype_2),
+      level = ellipse_level, linewidth = 0.5),
+    ggplot2::scale_fill_manual(values = ETIOLOGY_NIU_DISTINCT_COLORS,
+                               breaks = present, na.value = "grey70",
+                               name = "Etiology",
+                               guide = ggplot2::guide_legend(
+                                 ncol = legend_ncol, order = 1,
+                                 override.aes = list(shape = 21, size = 3,
+                                                     colour = "grey30"))),
+    ggplot2::scale_colour_manual(values = ETIOLOGY_GROUP_COLORS,
+                                 na.value = "grey50", name = NULL,
+                                 guide = ggplot2::guide_legend(
+                                   order = 2,
+                                   override.aes = list(shape = 21, size = 3,
+                                                       fill = NA, stroke = 1.1)))
+  )
+}
+
 # ---------------------------------------------------------------------------
 # Compartment marker dot plot (scplotter, viridis) — replaces the old
 # F<n>_panelB_dotplot. Filename: <cmp>_substate_marker_dotplot.pdf
@@ -842,11 +902,17 @@ read_per_substate_dge <- function(paths,
   tibble::as_tibble(df)
 }
 
+# covariate_cols: optional character vector of numeric meta.data columns. For 
+# each one, the mean over exactly the cells that formed each pseudobulk column 
+# is carried on the returned colData. This has to happen here, where the 
+# contributing cell index `idx` is already in hand — a per-sample lookup would 
+# be the wrong unit, since the pseudobulk unit is (substate x sample), not sample.
 build_per_substate_pseudobulks <- function(obj,
                                            cluster_col = "knn.leiden.cluster",
                                            group_col   = "Phenotype_2",
                                            groups      = c("NIU", "Viral"),
-                                           min_cells_per_pb = 10) {
+                                           min_cells_per_pb = 10,
+                                           covariate_cols = NULL) {
   if (!cluster_col %in% colnames(obj[[]])) return(list())
   meta <- obj[[]]
   sample_col <- if ("Subject_Timepoint" %in% colnames(meta))
@@ -897,6 +963,10 @@ build_per_substate_pseudobulks <- function(obj,
                         n_cells = 0L,
                         stringsAsFactors = FALSE)
 
+  covariate_cols <- intersect(as.character(covariate_cols %||% character(0)),
+                              colnames(obj_meta))
+  for (cvn in covariate_cols) pb_meta[[cvn]] <- NA_real_
+
   for (i in seq_len(nrow(pb_meta))) {
     cn <- pb_meta$col[i]
     idx <- which(col_lookup_a == cn | col_lookup_b == cn)
@@ -905,6 +975,12 @@ build_per_substate_pseudobulks <- function(obj,
     pb_meta$sample[i]  <- obj_meta$.pb_sample[idx[1]]
     pb_meta$group[i]   <- obj_meta$.pb_group[idx[1]]
     pb_meta$n_cells[i] <- length(idx)
+    # Unweighted cell mean. Pseudobulk counts are sums, so an nCount-weighted
+    # mean is arguably more faithful, but the two agree to well within the
+    # within-substate spread and the unweighted version is what the per-cell
+    # tables report.
+    for (cvn in covariate_cols)
+      pb_meta[[cvn]][i] <- mean(as.numeric(obj_meta[[cvn]][idx]), na.rm = TRUE)
   }
 
   keep_cols <- !is.na(pb_meta$cluster) & pb_meta$n_cells >= min_cells_per_pb
